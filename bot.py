@@ -7,7 +7,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# توکن ربات (می‌توانید از متغیرهای محیطی Railway نیز بخوانید)
+# توکن ربات
 TOKEN = os.getenv("BOT_TOKEN", "8865295559:AAEOEDFV-Ikd3rZl6gzyR8V23RIlE7fGcVw")
 GROUP_ID = -1003619551361
 RAW_GROUP_ID = "3619551361" 
@@ -48,7 +48,6 @@ AUTHORIZED_STAFF = {
     "احمدرضا آموزنده": 15.0
 }
 
-# راه‌اندازی ربات بدون پراکسی محلی برای سرور ابری
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -338,11 +337,12 @@ async def finalize_leave_request(message: Message, user_id, user_name, balance, 
 
     try:
         await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_LEAVE, text=text, reply_markup=admin_keyboard)
-        await message.answer(f"✅ درخواست مرخصی شما (کد: #{req_id}) ثبت شد.")
+        await message.answer(f"✅ درخواست مرخصی شما (کد: #{req_id}) ثبت و به تاپیک مرخصی در گروه ارسال شد.")
     except Exception as e:
-        print(f"❌ خطا: {e}")
+        print(f"❌ خطا در ارسال مرخصی به گروه: {e}")
+        await message.answer("❌ درخواست ثبت شد اما در ارسال به گروه خطایی رخ داد.")
 
-    await message.state.clear() if hasattr(message, 'state') else None
+    await state.clear()
 
 @dp.message(Form.waiting_for_advance_amount)
 async def receive_advance_amount(message: Message, state: FSMContext):
@@ -406,10 +406,16 @@ async def receive_advance_reason(message: Message, state: FSMContext):
     ])
 
     try:
-        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_ADVANCE, text=text, reply_markup=admin_keyboard)
-        await message.answer(f"✅ درخواست مساعده شما (کد: #{req_id}) ثبت شد.")
+        await bot.send_message(
+            chat_id=GROUP_ID, 
+            message_thread_id=TOPIC_ADVANCE, 
+            text=text, 
+            reply_markup=admin_keyboard
+        )
+        await message.answer(f"✅ درخواست مساعده شما (کد: #{req_id}) ثبت و به تاپیک مساعده در گروه ارسال شد.")
     except Exception as e:
-        print(f"❌ خطا: {e}")
+        print(f"❌ خطا در ارسال مساعده به گروه: {e}")
+        await message.answer("❌ درخواست ثبت شد اما در ارسال به گروه خطایی رخ داد.")
 
     await state.clear()
 
@@ -487,7 +493,7 @@ async def receive_mission_days(message: Message, state: FSMContext):
                      f"وضعیت: ⏳ در انتظار تأیید سرپرست")
 
         await bot.edit_message_text(chat_id=GROUP_ID, message_id=msg_id, text=real_text, reply_markup=real_keyboard, parse_mode="Markdown")
-        await message.answer(f"✅ گزارش ماموریت شما (کد: #{req_id}) ثبت شد و مستقیماً به تاپیک ماموریت ارسال گردید.", reply_markup=None)
+        await message.answer(f"✅ گزارش ماموریت شما (کد: #{req_id}) ثبت و مستقیماً به تاپیک ماموریت در گروه ارسال گردید.", reply_markup=None)
     except Exception as e:
         print(f"❌ خطا در ارسال به تاپیک ماموریت: {e}")
         await message.answer("❌ خطا در ارسال اطلاعات به تاپیک ماموریت.")
@@ -672,5 +678,5 @@ async def generate_advanced_report(callback: CallbackQuery, state: FSMContext):
 
 if __name__ == "__main__":
     import asyncio
-    print("Bot is running with separated Excel columns and Friday count in leave summary...")
+    print("Bot is running with full topic integration...")
     asyncio.run(dp.start_polling(bot))
