@@ -1,13 +1,27 @@
 import os
+import re
+import asyncio
 import sqlite3
 import pandas as pd
 import jdatetime
+from io import BytesIO
+
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    BufferedInputFile, FSInputFile
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# توکن ربات
+# کتابخانه ساخت PDF رسمی
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+# ---------------------------------------------------------
+# تنظیمات اصلی
+# ---------------------------------------------------------
 TOKEN = os.getenv("BOT_TOKEN", "8865295559:AAEOEDFV-Ikd3rZl6gzyR8V23RIlE7fGcVw")
 GROUP_ID = -1003619551361
 RAW_GROUP_ID = "3619551361" 
@@ -15,15 +29,16 @@ RAW_GROUP_ID = "3619551361"
 TOPIC_LEAVE = 2     # تاپیک مرخصی
 TOPIC_ADVANCE = 3   # تاپیک مساعده
 TOPIC_MISSION = 38  # تاپیک ماموریت
+TOPIC_PETTY = 57    # تاپیک تنخواه
+TOPIC_ASSETS = 59    # تاپیک تحویل اموال (می‌توانید تغییر دهید)
 
-# مدیران سیستم
 ADMIN_IDS = [114906446, 827616077]
+MAIN_ADMIN_ID = 114906446
+FINANCE_MANAGER_ID = 114906446 
 
-# سقف‌ها و محدودیت‌های سازمانی
-MAX_ADVANCE_AMOUNT = 100_000_000  # حداکثر سقف مساعده (۱۰۰ میلیون ریال)
+MAX_BASE_ADVANCE = 100_000_000  # سقف کل ماهانه (۱۰۰ میلیون ریال)
 
-# 📌 لیست رسمی اسامی پرسنل مجاز همراه با مقدار مرخصی ذخیره اولیه (بر حسب روز)
-AUTHORIZED_STAFF = {
+INITIAL_AUTHORIZED_STAFF = {
     "امید یزدان پناه": 0.0,
     "ایمان یزدان پناه": 0.0,
     "امین ارکیان": 0.0,
@@ -51,6 +66,81 @@ AUTHORIZED_STAFF = {
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# ---------------------------------------------------------
+# توابع اعتبارسنجی
+# ---------------------------------------------------------
+def validate_jalali_date(date_text: str) -> bool:
+    pattern = r'^\d{4}[/-]\d{1,2}[/-]\d{1,2}$'
+    if not re.match(pattern, date_text.strip()):
+        return False
+    try:
+        parts = [int(x) for x in date_text.strip().replace('-', '/').split('/')]
+        jdatetime.date(parts[0], parts[1], parts[2])
+        return True
+    except Exception:
+        return False
+
+def validate_card_or_sheba(text: str) -> bool:
+    clean_text = text.strip().replace(" ", "").upper()
+    if clean_text.isdigit() and len(clean_text) == 16:
+        return True
+    if clean_text.startswith("IR") and len(clean_text) == 26 and clean_text[2:].isdigit():
+        return True
+    if clean_text.isdigit() and len(clean_text) == 24:
+        return True
+    return False
+
+# ---------------------------------------------------------
+# ساخت فرم رسمی PDF
+# ---------------------------------------------------------
+def generate_official_pdf(req_id, req_type, user_name, phone, details, status, created_at) -> bytes:
+    buffer = BytesIO()
+    p = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    
+    p.setLineWidth(2)
+    p.rect(20, 20, width - 40, height - 40)
+    
+    p.setFont("Helvetica-Bold", 16)
+    p.drawCentredString(width / 2, height - 60, "Official Request Approval Form")
+    p.setFont("Helvetica", 10)
+    p.drawCentredString(width / 2, height - 80, f"Tracking Code: #{req_id} | Date: {created_at}")
+    p.line(40, height - 95, width - 40, height - 95)
+    
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, height - 130, f"Request Type: {req_type}")
+    p.drawString(50, height - 150, f"Applicant Name: {user_name}")
+    p.drawString(50, height - 170, f"Contact Phone: {phone if phone else 'N/A'}")
+    p.drawString(50, height - 190, f"Status: {status}")
+    
+    p.line(40, height - 210, width - 40, height - 210)
+    p.setFont("Helvetica", 11)
+    
+    y = height - 240
+    p.drawString(50, y, "Details & Descriptions:")
+    y -= 25
+    for line in str(details).split("|"):
+        p.drawString(70, y, f"- {line.strip()}")
+        y -= 20
+        
+    p.line(40, 120, width - 40, 120)
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(70, 90, "Supervisor Approval")
+    p.drawString(width - 200, 90, "Management Approval")
+    
+    p.setFont("Helvetica", 8)
+    p.drawString(70, 70, "Signature & Date")
+    p.drawString(width - 200, 70, "Signature & Date")
+    
+    p.showPage()
+    p.save()
+    pdf_out = buffer.getvalue()
+    buffer.close()
+    return pdf_out
+
+# ---------------------------------------------------------
+# پایگاه داده (Database)
+# ---------------------------------------------------------
 def init_db():
     conn = sqlite3.connect("requests.db")
     cursor = conn.cursor()
@@ -71,26 +161,73 @@ def init_db():
         )
     """)
     
-    # اضافه کردن خودکار ستون‌ها در صورت وجود دیتابیس قدیمی
     for col in ["col1", "col2", "col3", "location", "month_tag", "telegram_info"]:
         try:
             cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
-            pass  # اگر ستون از قبل وجود داشته باشد خطا نادیده گرفته می‌شود
+            pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS staff_mapping (
             user_id INTEGER PRIMARY KEY,
-            staff_name TEXT,
+            staff_name TEXT UNIQUE,
+            phone_number TEXT,
             leave_balance REAL
         )
     """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS holidays (
+            h_date TEXT PRIMARY KEY,
+            description TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    
+    try:
+        cursor.execute("ALTER TABLE staff_mapping ADD COLUMN phone_number TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    cursor.execute("SELECT COUNT(*) FROM staff_mapping")
+    if cursor.fetchone()[0] == 0:
+        for idx, (sname, bal) in enumerate(INITIAL_AUTHORIZED_STAFF.items(), start=1000):
+            cursor.execute("INSERT OR IGNORE INTO staff_mapping (user_id, staff_name, leave_balance) VALUES (?, ?, ?)", 
+                           (idx, sname, bal))
+            
     conn.commit()
     conn.close()
 
 init_db()
 
+def get_finance_manager_id():
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = 'finance_manager_id'")
+    row = cursor.fetchone()
+    conn.close()
+    if row and row[0].isdigit():
+        return int(row[0])
+    return FINANCE_MANAGER_ID
+
+def set_finance_manager_id(new_id: int):
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('finance_manager_id', ?)", (str(new_id),))
+    conn.commit()
+    conn.close()
+
+# ---------------------------------------------------------
+# وضعیت‌های FSM (States)
+# ---------------------------------------------------------
 class Form(StatesGroup):
+    waiting_for_phone = State()
     waiting_for_name = State()          
     waiting_for_leave_type = State()    
     waiting_for_leave_start_date = State()   
@@ -98,527 +235,141 @@ class Form(StatesGroup):
     waiting_for_hourly_date = State()
     waiting_for_hourly_times = State()
     waiting_for_advance_amount = State()
+    waiting_for_advance_card = State()
     waiting_for_advance_reason = State()
     waiting_for_mission_city = State()  
-    waiting_for_mission_days = State()  
+    waiting_for_mission_days = State()
+    waiting_for_petty_photo = State()
+    waiting_for_petty_amount = State()
+    waiting_for_petty_desc = State()
+    # وضعیت‌های تحویل اموال
+    waiting_for_asset_type = State()
+    waiting_for_asset_details = State()
 
-def get_staff_info(user_id: int):
+class AdminForm(StatesGroup):
+    add_staff_name = State()
+    add_staff_balance = State()
+    edit_balance_select_user = State()
+    edit_balance_new_value = State()
+    add_holiday_date = State()
+    set_finance_id = State()
+
+# ---------------------------------------------------------
+# توابع کمکی
+# ---------------------------------------------------------
+def get_staff_info_by_id(user_id: int):
     conn = sqlite3.connect("requests.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT staff_name, leave_balance FROM staff_mapping WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT staff_name, leave_balance, phone_number FROM staff_mapping WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    return row if row else (None, 0.0)
+    return row if row else (None, 0.0, None)
 
+def is_staff_authorized(name: str):
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, leave_balance, phone_number FROM staff_mapping WHERE staff_name = ?", (name,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def get_holidays_list():
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT h_date FROM holidays")
+    rows = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+# ---------------------------------------------------------
+# دستورات اولیه و احراز هویت با شماره تماس
+# ---------------------------------------------------------
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
-    staff_name, balance = get_staff_info(user_id)
+    staff_name, balance, phone = get_staff_info_by_id(user_id)
 
+    if not phone:
+        kb = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="📱 اشتراک‌گذاری شماره تلفن جهت احراز هویت", request_contact=True)]],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        await state.set_state(Form.waiting_for_phone)
+        await message.answer("سلام! به سامانه مدیریت پرسنلی خوش آمدید.\nبرای استفاده از ربات، لطفا شماره تلفن خود را ارسال نمایید:", reply_markup=kb)
+        return
+
+    await show_main_menu(message, staff_name, balance)
+
+async def show_main_menu(message: Message, staff_name, balance):
+    user_id = message.from_user.id
     keyboard_buttons = [
         [InlineKeyboardButton(text="⏳ درخواست مرخصی", callback_data="req_leave")],
         [InlineKeyboardButton(text="💵 درخواست مساعده (ریال)", callback_data="req_advance")],
         [InlineKeyboardButton(text="📍 ثبت گزارش ماموریت", callback_data="req_mission")],
+        [InlineKeyboardButton(text="🧾 ثبت فاکتور تنخواه", callback_data="req_petty")],
+        [InlineKeyboardButton(text="🚗 تحویل/ثبت اموال و تجهیزات", callback_data="req_asset")],
+        [InlineKeyboardButton(text="📊 وضعیت من (آمار ماه جاری)", callback_data="my_stats")],
         [InlineKeyboardButton(text="📋 پیگیری و لغو درخواست‌ها", callback_data="my_requests")]
     ]
     
     if user_id in ADMIN_IDS:
-        keyboard_buttons.append([InlineKeyboardButton(text="📊 گزارش پیشرفته مرخصی‌ها", callback_data="report_leave")])
-        keyboard_buttons.append([InlineKeyboardButton(text="💵 گزارش پیشرفته مساعده‌ها", callback_data="report_advance")])
-        keyboard_buttons.append([InlineKeyboardButton(text="📍 گزارش پیشرفته ماموریت‌ها", callback_data="report_mission")])
+        keyboard_buttons.append([InlineKeyboardButton(text="⚙️ منوی مدیریت شیشه‌ای", callback_data="admin_panel")])
+        keyboard_buttons.append([InlineKeyboardButton(text="📅 مرخصی‌های فعال امروز (/today)", callback_data="admin_today")])
+        keyboard_buttons.append([InlineKeyboardButton(text="📊 گزارشات پیشرفته Excel", callback_data="reports_menu")])
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-    status_text = f"👤 پرسنل متصل: **{staff_name}** | 🌿 مرخصی ذخیره: `{balance} روز`" if staff_name else "⚠️ نام شما هنوز در سیستم ثبت نشده است."
+    status_text = f"👤 پرسنل: **{staff_name}** | 🌿 مرخصی ذخیره: `{balance} روز`" if staff_name else "⚠️ نام شما ثبت نشده است."
     
-    await message.answer(
-        f"سلام! به سامانه جامع مدیریت درخواست‌های پرسنلی خوش آمدید.\n{status_text}\n\nلطفاً گزینه مورد نظر را انتخاب کنید:", 
-        reply_markup=keyboard
-    )
+    await message.answer(f"سامانه جامع مدیریت پرسنلی\n{status_text}\n\nلطفاً گزینه مورد نظر را انتخاب کنید:", reply_markup=keyboard)
 
-@dp.message(F.text == "/reset_db")
-async def reset_database(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⚠️ شما دسترسی ندارید!")
-        return
-        
-    if os.path.exists("requests.db"):
-        os.remove("requests.db")
-        init_db()
-        await message.answer("✅ دیتابیس با موفقیت ریست و جداول از نو ساخته شدند!")
-    else:
-        await message.answer("⚠️ فایل دیتابیس یافت نشد.")
-
-@dp.callback_query(F.data.in_({"req_leave", "req_advance", "req_mission"}))
-async def process_request_start(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    staff_name, _ = get_staff_info(user_id)
-    
-    if callback.data == "req_leave":
-        req_type = "مرخصی"
-    elif callback.data == "req_advance":
-        req_type = "مساعده"
-    else:
-        req_type = "ماموریت"
-
-    await state.update_data(current_request_type=req_type)
-
-    if not staff_name:
-        await state.set_state(Form.waiting_for_name)
-        await callback.message.answer(
-            f"شما قصد ثبت درخواست **{req_type}** را دارید.\n\n"
-            "لطفاً **نام و نام خانوادگی** خود را (دقیقاً مطابق با لیست پرسنل) وارد کنید:"
-        )
-        await callback.answer()
-        return
-
-    await state.update_data(verified_staff_name=staff_name)
-    
-    if req_type == "مرخصی":
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="استحقاقی", callback_data="ltype_استحقاقی")],
-                [InlineKeyboardButton(text="استعلاجی", callback_data="ltype_استعلاجی")],
-                [InlineKeyboardButton(text="ساعتی", callback_data="ltype_ساعتی")],
-                [InlineKeyboardButton(text="بدون حقوق", callback_data="ltype_بدون_حقوق")]
-            ]
-        )
-        await callback.message.answer(f"ثبت درخواست مرخصی برای: **{staff_name}**\nلطفاً نوع مرخصی خود را انتخاب کنید:", reply_markup=keyboard)
-        await state.set_state(Form.waiting_for_leave_type)
-    elif req_type == "مساعده":
-        await state.set_state(Form.waiting_for_advance_amount)
-        await callback.message.answer(
-            f"ثبت درخواست مساعده برای: **{staff_name}**\n\n"
-            f"⚠️ *سقف مجاز هر درخواست: {MAX_ADVANCE_AMOUNT:,} ریال*\n\n"
-            "1️⃣ لطفاً **مبلغ درخواستی (به ریال)** را وارد کنید:"
-        )
-    else:
-        await state.set_state(Form.waiting_for_mission_city)
-        await callback.message.answer(
-            f"ثبت گزارش ماموریت برای: **{staff_name}**\n\n"
-            "1️⃣ لطفاً **شهر مقصد** را وارد کنید:"
-        )
-    await callback.answer()
-
-@dp.message(Form.waiting_for_name)
-async def verify_and_lock_name(message: Message, state: FSMContext):
-    entered_name = message.text.strip()
+@dp.message(Form.waiting_for_phone, F.contact)
+async def process_phone_contact(message: Message, state: FSMContext):
+    phone = message.contact.phone_number
     user_id = message.from_user.id
-
-    if entered_name not in AUTHORIZED_STAFF:
-        await message.answer("❌ نام وارد شده در لیست پرسنل مجاز یافت نشد! لطفاً دوباره تلاش کنید:")
-        return
-
-    initial_balance = AUTHORIZED_STAFF[entered_name]
 
     conn = sqlite3.connect("requests.db")
     cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT OR REPLACE INTO staff_mapping (user_id, staff_name, leave_balance) VALUES (?, ?, ?)", 
-                       (user_id, entered_name, initial_balance))
-        conn.commit()
-    except Exception:
-        pass
-    conn.close()
-
-    await state.update_data(verified_staff_name=entered_name)
-    user_data = await state.get_data()
-    req_type = user_data.get("current_request_type")
-
-    if req_type == "مرخصی":
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="استحقاقی", callback_data="ltype_استحقاقی")],
-                [InlineKeyboardButton(text="استعلاجی", callback_data="ltype_استعلاجی")],
-                [InlineKeyboardButton(text="ساعتی", callback_data="ltype_ساعتی")],
-                [InlineKeyboardButton(text="بدون حقوق", callback_data="ltype_بدون_حقوق")]
-            ]
-        )
-        await message.answer(f"✅ نام شما ثبت شد: **{entered_name}** (مرخصی ذخیره: {initial_balance} روز)\n\nلطفاً نوع مرخصی را انتخاب کنید:", reply_markup=keyboard)
-        await state.set_state(Form.waiting_for_leave_type)
-    elif req_type == "مساعده":
-        await state.set_state(Form.waiting_for_advance_amount)
-        await message.answer(f"✅ نام شما ثبت شد: **{entered_name}**\n\n1️⃣ مبلغ درخواستی (به ریال) را وارد کنید:")
-    else:
-        await state.set_state(Form.waiting_for_mission_city)
-        await message.answer(f"✅ نام شما ثبت شد: **{entered_name}**\n\n1️⃣ شهر مقصد را وارد کنید:")
-
-@dp.callback_query(Form.waiting_for_leave_type, F.data.startswith("ltype_"))
-async def process_leave_type_selected(callback: CallbackQuery, state: FSMContext):
-    ltype = callback.data.split("_")[1]
-    await state.update_data(leave_type=ltype)
-    
-    if ltype == "ساعتی":
-        await state.set_state(Form.waiting_for_hourly_date)
-        await callback.message.answer("⏱️ **مرخصی ساعتی**\n\n1️⃣ لطفاً **تاریخ روز مرخصی** را وارد کنید (مثلاً: 1405/08/20):")
-    else:
-        await state.set_state(Form.waiting_for_leave_start_date)
-        await callback.message.answer(f"نوع مرخصی: **{ltype}**\n\n1️⃣ لطفاً **تاریخ خروج** (شروع مرخصی) را وارد کنید (مثلاً: 1405/08/20):")
-    await callback.answer()
-
-@dp.message(Form.waiting_for_hourly_date)
-async def receive_hourly_date(message: Message, state: FSMContext):
-    await state.update_data(hourly_date=message.text)
-    await state.set_state(Form.waiting_for_hourly_times)
-    await message.answer("2️⃣ لطفاً **ساعت خروج و ورود** را وارد کنید (مثلاً: از ساعت 09:00 تا 13:00):")
-
-@dp.message(Form.waiting_for_hourly_times)
-async def receive_hourly_times(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    user_id = message.from_user.id
-    staff_name, balance = get_staff_info(user_id)
-    user_name = user_data.get("verified_staff_name") or staff_name
-    
-    leave_date = user_data.get("hourly_date")
-    times = message.text
-    
-    col1 = f"تاریخ: {leave_date}"
-    col2 = f"ساعت: {times}"
-    col3 = "مدت: ساعتی (0 روز)"
-    details = f"تاریخ: {leave_date} | ساعت: {times}"
-
-    await finalize_leave_request(message, user_id, user_name, balance, col1, col2, col3, details, 0.0)
-
-@dp.message(Form.waiting_for_leave_start_date)
-async def receive_leave_start(message: Message, state: FSMContext):
-    await state.update_data(leave_start=message.text)
-    await state.set_state(Form.waiting_for_leave_end_date)
-    await message.answer("2️⃣ لطفاً **تاریخ ورود** (پایان مرخصی) را وارد کنید (مثلاً: 1405/08/22):")
-
-@dp.message(Form.waiting_for_leave_end_date)
-async def receive_leave_end(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    user_id = message.from_user.id
-    staff_name, balance = get_staff_info(user_id)
-    user_name = user_data.get("verified_staff_name") or staff_name
-    
-    leave_type = user_data.get("leave_type", "معمولی")
-    start_str = user_data.get("leave_start")
-    end_str = message.text
-
-    calculated_days = 1.0
-    friday_count = 0
-    try:
-        s_parts = [int(x) for x in start_str.replace('-', '/').split('/')]
-        e_parts = [int(x) for x in end_str.replace('-', '/').split('/')]
-        
-        d1 = jdatetime.date(s_parts[0], s_parts[1], s_parts[2])
-        d2 = jdatetime.date(e_parts[0], e_parts[1], e_parts[2])
-        
-        current_d = d1
-        working_days = 0
-        while current_d <= d2:
-            if current_d.weekday() == 6:  # جمعه
-                friday_count += 1
-            else:
-                working_days += 1
-            current_d += jdatetime.timedelta(days=1)
-            
-        calculated_days = float(working_days) if working_days > 0 else 1.0
-    except Exception:
-        calculated_days = 1.0
-
-    col1 = f"خروج: {start_str}"
-    col2 = f"ورود: {end_str}"
-    col3 = f"تعداد روز: {calculated_days} روز (با احتساب {friday_count} روز جمعه)"
-    details = f"نوع: {leave_type} | خروج: {start_str} | ورود: {end_str} | کسرشونده: {calculated_days} روز (جمعه‌ها: {friday_count} روز)"
-
-    await finalize_leave_request(message, user_id, user_name, balance, col1, col2, col3, details, calculated_days)
-
-async def finalize_leave_request(message: Message, user_id, user_name, balance, col1, col2, col3, details, days_to_deduct):
-    tg_name = message.from_user.full_name
-    tg_username = f"@{message.from_user.username}" if message.from_user.username else "ندارد"
-    telegram_info = f"{tg_name} ({tg_username} - ID: {user_id})"
-    
-    now_jalali = jdatetime.datetime.now()
-    created_at = now_jalali.strftime("%Y/%m/%d %H:%M")
-    month_tag = now_jalali.strftime("%Y/%m")
-    
-    conn = sqlite3.connect("requests.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, user_name, telegram_info, "مرخصی", col1, col2, col3, str(days_to_deduct), "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
-    req_id = cursor.lastrowid
+    cursor.execute("UPDATE staff_mapping SET phone_number = ? WHERE user_id = ?", (phone, user_id))
     conn.commit()
     conn.close()
 
-    text = (f"📩 **درخواست مرخصی جدید (مرحله 1)** (کد: #{req_id})\n\n"
-            f"👤 پرسنل: {user_name} (مرخصی ذخیره: {balance} روز)\n"
-            f"📱 تلگرام: {telegram_info}\n"
-            f"📝 جزئیات: {details}\n"
-            f"📅 تاریخ ثبت: {created_at}\n"
-            f"وضعیت: ⏳ در انتظار تأیید سرپرست")
-    
-    admin_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")],
-        [InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_{req_id}")]
-    ])
+    await message.answer("✅ احراز هویت با موفقیت انجام شد.", reply_markup=ReplyKeyboardRemove())
+    staff_name, balance, _ = get_staff_info_by_id(user_id)
+    await show_main_menu(message, staff_name, balance)
 
-    try:
-        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_LEAVE, text=text, reply_markup=admin_keyboard)
-        await message.answer(f"✅ درخواست مرخصی شما (کد: #{req_id}) ثبت و به تاپیک مرخصی در گروه ارسال شد.")
-    except Exception as e:
-        print(f"❌ خطا در ارسال مرخصی به گروه: {e}")
-        await message.answer("❌ درخواست ثبت شد اما در ارسال به گروه خطایی رخ داد.")
-
-    await message.state.clear() if hasattr(message, 'state') else None
-
-@dp.message(Form.waiting_for_advance_amount)
-async def receive_advance_amount(message: Message, state: FSMContext):
-    text_val = message.text.replace(",", "").replace("ریال", "").strip()
-    try:
-        amount = int(''.join(filter(str.isdigit, text_val)))
-    except ValueError:
-        amount = 0
-
-    if amount > MAX_ADVANCE_AMOUNT:
-        await message.answer(f"⚠️ **اخطار سقف مساعده!** مبلغ درخواستی بیشتر از سقف مجاز ({MAX_ADVANCE_AMOUNT:,} ریال) است. لطفاً مبلغ کمتر وارد کنید:")
-        return
-
-    await state.update_data(advance_amount=message.text)
-    await state.set_state(Form.waiting_for_advance_reason)
-    await message.answer("2️⃣ لطفاً **دلیل درخواست مساعده** را بنویسید:")
-
-@dp.message(Form.waiting_for_advance_reason)
-async def receive_advance_reason(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    user_id = message.from_user.id
-    staff_name, _ = get_staff_info(user_id)
-    user_name = user_data.get("verified_staff_name") or staff_name
-    
-    amount_str = user_data.get("advance_amount")
-    reason = message.text
-
-    col1 = f"مبلغ: {amount_str} ریال"
-    col2 = f"دلیل: {reason}"
-    col3 = "-"
-    details = f"مبلغ: {amount_str} ریال | دلیل: {reason}"
-
-    tg_name = message.from_user.full_name
-    tg_username = f"@{message.from_user.username}" if message.from_user.username else "ندارد"
-    telegram_info = f"{tg_name} ({tg_username} - ID: {user_id})"
-    
-    now_jalali = jdatetime.datetime.now()
-    created_at = now_jalali.strftime("%Y/%m/%d %H:%M")
-    month_tag = now_jalali.strftime("%Y/%m")
-    
-    conn = sqlite3.connect("requests.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, user_name, telegram_info, "مساعده", col1, col2, col3, "ندارد", "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
-    req_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-
-    text = (f"💵 **درخواست مساعده جدید (مرحله 1)** (کد: #{req_id})\n\n"
-            f"👤 پرسنل: {user_name}\n"
-            f"📱 تلگرام: {telegram_info}\n"
-            f"📝 جزئیات: {details}\n"
-            f"📅 تاریخ ثبت: {created_at}\n"
-            f"وضعیت: ⏳ در انتظار تأیید سرپرست")
-    
-    admin_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")],
-        [InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_{req_id}")]
-    ])
-
-    try:
-        await bot.send_message(
-            chat_id=GROUP_ID, 
-            message_thread_id=TOPIC_ADVANCE, 
-            text=text, 
-            reply_markup=admin_keyboard
-        )
-        await message.answer(f"✅ درخواست مساعده شما (کد: #{req_id}) ثبت و به تاپیک مساعده در گروه ارسال شد.")
-    except Exception as e:
-        print(f"❌ خطا در ارسال مساعده به گروه: {e}")
-        await message.answer("❌ درخواست ثبت شد اما در ارسال به گروه خطایی رخ داد.")
-
-    await state.clear()
-
-@dp.message(Form.waiting_for_mission_city)
-async def receive_mission_city(message: Message, state: FSMContext):
-    await state.update_data(mission_city=message.text)
-    await state.set_state(Form.waiting_for_mission_days)
-    await message.answer("2️⃣ لطفاً **تعداد روز ماموریت** را وارد کنید (مثلاً: ۳):")
-
-@dp.message(Form.waiting_for_mission_days)
-async def receive_mission_days(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    user_id = message.from_user.id
-    staff_name, _ = get_staff_info(user_id)
-    user_name = user_data.get("verified_staff_name") or staff_name
-    
-    city = user_data.get("mission_city", "نامشخص")
-    days = message.text
-
-    col1 = f"شهر مقصد: {city}"
-    col2 = f"مدت: {days} روز"
-    col3 = "-"
-    details = f"شهر مقصد: {city} | مدت ماموریت: {days} روز"
-
-    tg_name = message.from_user.full_name
-    tg_username = f"@{message.from_user.username}" if message.from_user.username else "ندارد"
-    telegram_info = f"{tg_name} ({tg_username} - ID: {user_id})"
-    
-    now_jalali = jdatetime.datetime.now()
-    created_at = now_jalali.strftime("%Y/%m/%d %H:%M")
-    month_tag = now_jalali.strftime("%Y/%m")
-    
-    admin_keyboard_temp = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data="pending")]
-    ])
-    
-    text_preview = (f"📍 **گزارش ماموریت جدید (مرحله 1)**\n\n"
-                    f"👤 پرسنل: {user_name}\n"
-                    f"📱 تلگرام: {telegram_info}\n"
-                    f"📝 جزئیات: {details}\n"
-                    f"📅 تاریخ ثبت: {created_at}\n"
-                    f"وضعیت: ⏳ در انتظار تأیید سرپرست")
-
-    try:
-        sent_msg = await bot.send_message(
-            chat_id=GROUP_ID, 
-            message_thread_id=TOPIC_MISSION, 
-            text=text_preview, 
-            reply_markup=admin_keyboard_temp
-        )
-        msg_id = sent_msg.message_id
-        message_link = f"https://t.me/c/{RAW_GROUP_ID}/{TOPIC_MISSION}/{msg_id}"
-        
-        conn = sqlite3.connect("requests.db")
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, user_name, telegram_info, "ماموریت", col1, col2, col3, message_link, "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
-        req_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-
-        real_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")],
-            [InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_{req_id}")]
-        ])
-        
-        real_text = (f"📍 **گزارش ماموریت جدید (مرحله 1)** (کد: #{req_id})\n\n"
-                     f"👤 پرسنل: {user_name}\n"
-                     f"📱 تلگرام: {telegram_info}\n"
-                     f"📝 جزئیات: {details}\n"
-                     f"🔗 [لینک پیام در تاپیک]({message_link})\n"
-                     f"📅 تاریخ ثبت: {created_at}\n"
-                     f"وضعیت: ⏳ در انتظار تأیید سرپرست")
-
-        await bot.edit_message_text(chat_id=GROUP_ID, message_id=msg_id, text=real_text, reply_markup=real_keyboard, parse_mode="Markdown")
-        await message.answer(f"✅ گزارش ماموریت شما (کد: #{req_id}) ثبت و مستقیماً به تاپیک ماموریت در گروه ارسال گردید.", reply_markup=None)
-    except Exception as e:
-        print(f"❌ خطا در ارسال به تاپیک ماموریت: {e}")
-        await message.answer("❌ خطا در ارسال اطلاعات به تاپیک ماموریت.")
-
-    await state.clear()
-
-@dp.callback_query(F.data.startswith("step1_") | F.data.startswith("approve_") | F.data.startswith("reject_") | F.data.startswith("cancel_"))
-async def handle_request_decision(callback: CallbackQuery):
-    data = callback.data
-    user_id = callback.from_user.id
-    conn = sqlite3.connect("requests.db")
-    cursor = conn.cursor()
-
-    if data.startswith("cancel_"):
-        req_id = data.split("_")[1]
-        cursor.execute("SELECT user_id, status FROM requests WHERE id = ?", (req_id,))
-        row = cursor.fetchone()
-        
-        if row and row[0] == user_id:
-            if "در انتظار تأیید سرپرست" in row[1]:
-                cursor.execute("UPDATE requests SET status = '❌ لغو شده توسط پرسنل' WHERE id = ?", (req_id,))
-                conn.commit()
-                conn.close()
-                await callback.message.edit_text(callback.message.text + "\n\n**[این درخواست توسط شما لغو شد]**", reply_markup=None)
-                await callback.answer("درخواست شما با موفقیت لغو شد.")
-                return
-            else:
-                conn.close()
-                await callback.answer("⚠️ این درخواست بررسی شده و دیگر قابل لغو نیست.", show_alert=True)
-                return
-        conn.close()
-        return
-
+@dp.message(F.text == "/today")
+@dp.callback_query(F.data == "admin_today")
+async def cmd_today_leaves(event: Message | CallbackQuery):
+    user_id = event.from_user.id
     if user_id not in ADMIN_IDS:
-        await callback.answer("⚠️ شما دسترسی لازم را ندارید!", show_alert=True)
-        conn.close()
         return
-
-    admin_name = callback.from_user.full_name
-
-    if data.startswith("step1_"):
-        req_id = data.split("_")[1]
-        cursor.execute("UPDATE requests SET status = '⏳ در انتظار تأیید نهایی مدیریت' WHERE id = ?", (req_id,))
-        conn.commit()
-        
-        cursor.execute("SELECT user_id, request_type FROM requests WHERE id = ?", (req_id,))
-        row = cursor.fetchone()
-        conn.close()
-
-        original_text = callback.message.text
-        updated_text = original_text.replace("⏳ در انتظار تأیید سرپرست", f"✅ تأیید سرپرست ({admin_name})\nوضعیت: ⏳ در انتظار تأیید نهایی مدیریت")
-
-        final_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ تأیید نهایی", callback_data=f"approve_{req_id}"),
-                InlineKeyboardButton(text="❌ رد", callback_data=f"reject_{req_id}")
-            ]
-        ])
-
-        try:
-            await callback.message.edit_text(updated_text, reply_markup=final_keyboard, parse_mode="Markdown")
-        except Exception:
-            pass
-        
-        await callback.answer("مرحله اول تایید شد.")
-        return
-
-    action, req_id = data.split("_")
-    new_status = "✅ تأیید شده قطعی" if action == "approve" else "❌ رد شده"
     
-    cursor.execute("SELECT user_id, request_type, location FROM requests WHERE id = ?", (req_id,))
-    row = cursor.fetchone()
-    
-    if row:
-        target_user_id, req_type, location_col = row
-        cursor.execute("UPDATE requests SET status = ? WHERE id = ?", (new_status, req_id))
-        
-        if req_type == "مرخصی" and action == "approve":
-            try:
-                leave_days = float(location_col)
-                if leave_days > 0:
-                    cursor.execute("UPDATE staff_mapping SET leave_balance = leave_balance - ? WHERE user_id = ?", (leave_days, target_user_id))
-            except Exception:
-                pass
-            
-        conn.commit()
+    today_jalali = jdatetime.datetime.now().strftime("%Y/%m/%d")
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_name, request_type, col1, col2 FROM requests WHERE status LIKE '%تأیید شده%' AND (col1 LIKE ? OR col2 LIKE ?)", 
+                   (f"%{today_jalali}%", f"%{today_jalali}%"))
+    rows = cursor.fetchall()
     conn.close()
 
-    original_text = callback.message.text
-    updated_text = original_text.split("وضعیت:")[0] + f"وضعیت: {new_status} (توسط {admin_name})"
+    msg_text = f"📅 **لیست غایبین / حاضرین در مأموریت ({today_jalali}):**\n\n"
+    if not rows:
+        msg_text += "امروز هیچ موردی ثبت نشده است."
+    else:
+        for r in rows:
+            msg_text += f"▫️ **{r[0]}** ➔ {r[1]} ({r[2]} | {r[3]})\n"
 
-    try:
-        await callback.message.edit_text(updated_text, reply_markup=None, parse_mode="Markdown")
-    except Exception:
-        pass
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(msg_text)
+        await event.answer()
+    else:
+        await event.answer(msg_text)
 
-    if row:
-        try:
-            await bot.send_message(chat_id=target_user_id, text=f"📢 نتیجه بررسی: درخواست {req_type} شما (کد: #{req_id}) **{new_status}** شد.")
-        except Exception:
-            pass
-
-    await callback.answer(f"درخواست با موفقیت {new_status} شد.")
-
+# ---------------------------------------------------------
+# پیگیری و لغو درخواست‌ها توسط پرسنل
+# ---------------------------------------------------------
 @dp.callback_query(F.data == "my_requests")
 async def show_user_requests(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -646,23 +397,192 @@ async def show_user_requests(callback: CallbackQuery):
 
     await callback.answer()
 
-@dp.callback_query(F.data.in_({"report_leave", "report_advance", "report_mission"}))
-async def ask_report_month(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⚠️ دسترسی ندارید!", show_alert=True)
+# ---------------------------------------------------------
+# آمار و داشبورد پرسنل ("📊 وضعیت من")
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "my_stats")
+async def show_user_stats(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    staff_name, balance, _ = get_staff_info_by_id(user_id)
+    current_month = jdatetime.datetime.now().strftime("%Y/%m")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT location FROM requests WHERE user_id = ? AND request_type = 'مرخصی' AND month_tag = ? AND status LIKE '%تأیید شده%'", (user_id, current_month))
+    leave_rows = cursor.fetchall()
+    used_leave = sum([float(r[0]) for r in leave_rows if r[0] and r[0].replace('.', '', 1).isdigit()])
+
+    cursor.execute("SELECT col1 FROM requests WHERE user_id = ? AND request_type = 'مساعده' AND month_tag = ? AND status LIKE '%تأیید شده%'", (user_id, current_month))
+    adv_rows = cursor.fetchall()
+    total_adv = 0
+    for r in adv_rows:
+        val = ''.join(filter(str.isdigit, r[0]))
+        if val:
+            total_adv += int(val)
+
+    cursor.execute("SELECT col2 FROM requests WHERE user_id = ? AND request_type = 'ماموریت' AND month_tag = ? AND status LIKE '%تأیید شده%'", (user_id, current_month))
+    mission_rows = cursor.fetchall()
+    total_missions = len(mission_rows)
+
+    conn.close()
+
+    stats_msg = (
+        f"📊 **کارنامه و وضعیت ماه جاری ({current_month})**\n\n"
+        f"👤 **نام پرسنل:** {staff_name}\n"
+        f"🌿 **مرخصی استفاده‌شده ماه:** {used_leave} روز\n"
+        f"🍃 **مانده مرخصی کل:** {balance} روز\n"
+        f"💵 **مجموع مساعده دریافتی:** {total_adv:,} ریال\n"
+        f"📍 **تعداد مأموریت‌ها:** {total_missions} مورد\n"
+    )
+    await callback.message.answer(stats_msg)
+    await callback.answer()
+
+# ---------------------------------------------------------
+# پنل مدیریت شیشه‌ای (Interactive Admin Panel)
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "admin_panel")
+@dp.message(F.text == "/admin")
+async def show_admin_panel(event: CallbackQuery | Message, state: FSMContext):
+    user_id = event.from_user.id
+    if user_id not in ADMIN_IDS:
         return
 
-    rtype_map = {"report_leave": "مرخصی", "report_advance": "مساعده", "report_mission": "ماموریت"}
-    await state.update_data(report_type=rtype_map[callback.data])
-    
-    current_jalali_month = jdatetime.datetime.now().strftime("%Y/%m")
+    await state.clear()
+    current_fin_id = get_finance_manager_id()
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📁 دریافت کل گزارشات", callback_data="get_rep_all")],
-        [InlineKeyboardButton(text=f"📅 گزارش ماه جاری ({current_jalali_month})", callback_data=f"get_rep_{current_jalali_month}")]
+        [InlineKeyboardButton(text="➕ افزودن پرسنل جدید", callback_data="admin_add_staff")],
+        [InlineKeyboardButton(text="✏️ ویرایش مانده مرخصی", callback_data="admin_edit_balance")],
+        [InlineKeyboardButton(text="🗓️ افزودن تعطیل رسمی", callback_data="admin_add_holiday")],
+        [InlineKeyboardButton(text=f"💳 تغییر آیدی مسئول مالی (فعلی: {current_fin_id})", callback_data="admin_set_finance")],
+        [InlineKeyboardButton(text="📦 دانلود فوری بکاپ دیتابیس", callback_data="admin_get_backup")]
     ])
     
-    await callback.message.answer("لطفاً بازه مورد نظر برای گزارش را انتخاب کنید:", reply_markup=keyboard)
+    text = "⚙️ **پنل مدیریت شیشه‌ای پرسنل**\n\nلطفاً گزینه مورد نظر را انتخاب نمایید:"
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(text, reply_markup=keyboard)
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=keyboard)
+
+@dp.callback_query(F.data == "admin_set_finance")
+async def admin_set_finance_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminForm.set_finance_id)
+    await callback.message.answer("💳 **تغییر مسئول واحد مالی**\n\nلطفاً **User ID تلگرام** (یک عدد مانند `114906446`) مسئول جدید مالی را وارد کنید:")
+    await callback.answer()
+
+@dp.message(AdminForm.set_finance_id)
+async def admin_set_finance_save(message: Message, state: FSMContext):
+    val = message.text.strip()
+    if not val.isdigit():
+        await message.answer("❌ شناسه باید فقط **عدد** (User ID) باشد. دوباره وارد کنید:")
+        return
+
+    set_finance_manager_id(int(val))
+    await message.answer(f"✅ مسئول واحد مالی به شناسه `{val}` با موفقیت تغییر یافت.")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_get_backup")
+async def admin_backup_cb(callback: CallbackQuery):
+    if callback.from_user.id in ADMIN_IDS and os.path.exists("requests.db"):
+        await callback.message.answer_document(FSInputFile("requests.db"), caption="📦 پشتیبان دیتابیس")
+        await callback.answer()
+
+@dp.callback_query(F.data == "admin_add_holiday")
+async def admin_add_holiday_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminForm.add_holiday_date)
+    await callback.message.answer("🗓️ تاریخ تعطیل رسمی را با فرمت `YYYY/MM/DD` وارد کنید:")
+    await callback.answer()
+
+@dp.message(AdminForm.add_holiday_date)
+async def admin_save_holiday(message: Message, state: FSMContext):
+    h_date = message.text.strip()
+    if not validate_jalali_date(h_date):
+        await message.answer("❌ فرمت تاریخ نامعتبر است! دوباره وارد کنید:")
+        return
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO holidays (h_date, description) VALUES (?, ?)", (h_date, "تعطیل رسمی"))
+    conn.commit()
+    conn.close()
+
+    await message.answer(f"✅ تاریخ `{h_date}` به عنوان تعطیل رسمی ثبت شد.")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_add_staff")
+async def admin_add_staff_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    await state.set_state(AdminForm.add_staff_name)
+    await callback.message.answer("➕ **افزودن پرسنل جدید**\n\nنام و نام خانوادگی پرسنل را وارد کنید:")
+    await callback.answer()
+
+@dp.message(AdminForm.add_staff_name)
+async def admin_add_staff_name_step(message: Message, state: FSMContext):
+    name = message.text.strip()
+    await state.update_data(new_staff_name=name)
+    await state.set_state(AdminForm.add_staff_balance)
+    await message.answer(f"مقدار مرخصی ذخیره اولیه برای ({name}) را به عدد وارد کنید:")
+
+@dp.message(AdminForm.add_staff_balance)
+async def admin_add_staff_balance_step(message: Message, state: FSMContext):
+    try:
+        balance = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ فقط عدد مجاز است. دوباره وارد کنید:")
+        return
+
+    user_data = await state.get_data()
+    name = user_data.get("new_staff_name")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT IFNULL(MAX(user_id), 1000) + 1 FROM staff_mapping")
+    dummy_id = cursor.fetchone()[0]
+    
+    try:
+        cursor.execute("INSERT INTO staff_mapping (user_id, staff_name, leave_balance) VALUES (?, ?, ?)", (dummy_id, name, balance))
+        conn.commit()
+        await message.answer(f"✅ پرسنل **{name}** با {balance} روز مرخصی اضافه شد.")
+    except Exception:
+        await message.answer("⚠️ خطایی رخ داد یا پرسنل از قبل وجود دارد.")
+    conn.close()
+    await state.clear()
+
+# ---------------------------------------------------------
+# گزارش‌گیری پیشرفته اکسل
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "reports_menu")
+@dp.callback_query(F.data.in_({"report_leave", "report_advance", "report_mission", "report_petty", "report_asset"}))
+async def ask_report_type_or_month(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+
+    if callback.data == "reports_menu":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏳ گزارش مرخصی‌ها", callback_data="report_leave")],
+            [InlineKeyboardButton(text="💵 گزارش مساعده‌ها", callback_data="report_advance")],
+            [InlineKeyboardButton(text="📍 گزارش ماموریت‌ها", callback_data="report_mission")],
+            [InlineKeyboardButton(text="🧾 گزارش تنخواه‌ها", callback_data="report_petty")],
+            [InlineKeyboardButton(text="🚗 گزارش تحویل اموال", callback_data="report_asset")]
+        ])
+        await callback.message.answer("📊 نوع گزارش مورد نظر را انتخاب کنید:", reply_markup=kb)
+        await callback.answer()
+        return
+
+    rtype_map = {"report_leave": "مرخصی", "report_advance": "مساعده", "report_mission": "ماموریت", "report_petty": "تنخواه", "report_asset": "تحویل اموال"}
+    req_type = rtype_map[callback.data]
+    await state.update_data(report_type=req_type)
+    
+    current_jalali_month = jdatetime.datetime.now().strftime("%Y/%m")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📁 دریافت کل گزارشات", callback_data="get_rep_all")],
+        [InlineKeyboardButton(text=f"📅 ماه جاری ({current_jalali_month})", callback_data=f"get_rep_{current_jalali_month}")]
+    ])
+    
+    await callback.message.answer(f"بازه زمانی گزارش **{req_type}** را انتخاب کنید:", reply_markup=keyboard)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("get_rep_"))
@@ -690,14 +610,616 @@ async def generate_advanced_report(callback: CallbackQuery, state: FSMContext):
         await callback.answer("هیچ درخواستی در این بازه ثبت نشده است!", show_alert=True)
         return
 
-    df.columns = ["کد", "نام پرسنل", "اکانت تلگرام", "مرحله ۱ (خروج/مبلغ/شهر)", "مرحله ۲ (ورود/دلیل/مدت)", "مرحله ۳ (محاسبه روزها)", "لینک پیام / مقدار کسر", "وضعیت", "تاریخ ثبت", "ماه شمسی"]
+    df.columns = ["کد", "نام پرسنل", "اکانت تلگرام", "مشخصه ۱", "مشخصه ۲", "مشخصه ۳", "مقدار/لینک", "وضعیت", "تاریخ ثبت", "ماه شمسی"]
     df.to_excel(filename, index=False, engine='openpyxl')
     
     await callback.message.answer_document(BufferedInputFile.from_file(filename, filename=filename), caption=f"📊 گزارش پیشرفته {req_type}")
     await callback.answer()
     await state.clear()
 
+# ---------------------------------------------------------
+# بخش تحویل اموال و تجهیزات (Asset & Fleet Management)
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "req_asset")
+async def process_asset_start(callback: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚗 خودروی سازمانی", callback_data="asset_خودرو")],
+        [InlineKeyboardButton(text="💳 کارت‌خوان (POS)", callback_data="asset_کارتخوان")],
+        [InlineKeyboardButton(text="🖨️ پرینتر جیبی", callback_data="asset_پرینتر")],
+        [InlineKeyboardButton(text="⛽ کارت سوخت", callback_data="asset_کارت_سوخت")]
+    ])
+    await callback.message.answer("🚗 **ثبت تحویل اقلام امانی و تجهیزات**\n\nلطفاً نوع قلم مورد نظر را انتخاب کنید:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("asset_"))
+async def process_asset_type_selected(callback: CallbackQuery, state: FSMContext):
+    asset_type = callback.data.split("_")[1]
+    await state.update_data(asset_type=asset_type)
+    await state.set_state(Form.waiting_for_asset_details)
+    
+    prompt_text = f"قلم انتخابی: **{asset_type}**\n\nلطفاً **شماره پلاک، شماره سریال یا مشخصات کامل** قلم تحویلی (همراه با کیلومتر اولیه خودرو در صورت نیاز) را وارد کنید:"
+    await callback.message.answer(prompt_text)
+    await callback.answer()
+
+@dp.message(Form.waiting_for_asset_details)
+async def receive_asset_details(message: Message, state: FSMContext):
+    details = message.text.strip()
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, _, _ = get_staff_info_by_id(user_id)
+    
+    asset_type = user_data.get("asset_type", "تجهیزات")
+    now_j = jdatetime.datetime.now()
+    created_at = now_j.strftime("%Y/%m/%d %H:%M")
+    month_tag = now_j.strftime("%Y/%m")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, staff_name, message.from_user.full_name, "تحویل اموال", f"قلم: {asset_type}", f"مشخصات: {details}", "-", "ندارد", "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    text = (
+        f"🚗 **گزارش تحویل اموال / تجهیزات (کد: #{req_id})**\n\n"
+        f"👤 پرسنل تحویل‌گیرنده: {staff_name}\n"
+        f"📦 نوع قلم: {asset_type}\n"
+        f"📝 مشخصات/پلاک/سریال: {details}\n"
+        f"📅 تاریخ ثبت: {created_at}\n"
+        f"وضعیت: ⏳ در انتظار تأیید سرپرست"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")]
+    ])
+
+    try:
+        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_ASSETS, text=text, reply_markup=kb)
+        await message.answer(f"✅ فرم تحویل اموال (کد: #{req_id}) ثبت و برای تایید ارسال شد.")
+    except Exception:
+        await message.answer("❌ خطا در ارسال به گروه.")
+
+    await state.clear()
+
+# ---------------------------------------------------------
+# ثبت فاکتور تنخواه (Petty Cash) به تاپیک 57
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "req_petty")
+async def process_petty_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.waiting_for_petty_photo)
+    await callback.message.answer("🧾 **ثبت فاکتور تنخواه شرکت**\n\n1️⃣ لطفاً **عکس واضح فاکتور خرید** را ارسال نمایید:")
+    await callback.answer()
+
+@dp.message(Form.waiting_for_petty_photo, F.photo)
+async def receive_petty_photo(message: Message, state: FSMContext):
+    photo_id = message.photo[-1].file_id
+    await state.update_data(petty_photo=photo_id)
+    await state.set_state(Form.waiting_for_petty_amount)
+    await message.answer("2️⃣ لطفاً **مبلغ فاکتور (به ریال)** را به عدد وارد کنید:")
+
+@dp.message(Form.waiting_for_petty_amount)
+async def receive_petty_amount(message: Message, state: FSMContext):
+    raw_val = message.text.replace(",", "").strip()
+    if not raw_val.isdigit():
+        await message.answer("❌ مبلغ فقط باید **عدد** باشد. دوباره وارد کنید:")
+        return
+
+    await state.update_data(petty_amount=f"{int(raw_val):,} ریال")
+    await state.set_state(Form.waiting_for_petty_desc)
+    await message.answer("3️⃣ لطفاً **بابت / شرح هزینه** را بنویسید:")
+
+@dp.message(Form.waiting_for_petty_desc)
+async def receive_petty_desc(message: Message, state: FSMContext):
+    desc = message.text.strip()
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, _, _ = get_staff_info_by_id(user_id)
+
+    photo_id = user_data.get("petty_photo")
+    amount_str = user_data.get("petty_amount")
+
+    now_jalali = jdatetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+    month_tag = jdatetime.datetime.now().strftime("%Y/%m")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, staff_name, message.from_user.full_name, "تنخواه", f"مبلغ: {amount_str}", f"بابت: {desc}", "-", photo_id, "⏳ در انتظار تأیید سرپرست", now_jalali, month_tag))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    caption = (f"🧾 **فاکتور تنخواه جدید (کد: #{req_id})**\n\n"
+               f"👤 پرسنل: {staff_name}\n"
+               f"💵 مبلغ: {amount_str}\n"
+               f"📝 بابت: {desc}\n"
+               f"📅 تاریخ: {now_jalali}\n"
+               f"وضعیت: ⏳ در انتظار تأیید سرپرست")
+
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")],
+        [InlineKeyboardButton(text="❌ رد فاکتور", callback_data=f"reject_{req_id}")]
+    ])
+
+    try:
+        await bot.send_photo(chat_id=GROUP_ID, message_thread_id=TOPIC_PETTY, photo=photo_id, caption=caption, reply_markup=admin_kb)
+        await message.answer(f"✅ فاکتور تنخواه شما (کد: #{req_id}) ثبت و به تاپیک تنخواه ارسال شد.")
+    except Exception as e:
+        print(f"❌ خطا در ارسال فاکتور تنخواه: {e}")
+        await message.answer("❌ خطا در ارسال فاکتور به تاپیک تنخواه.")
+
+    await state.clear()
+
+# ---------------------------------------------------------
+# شروع درخواست‌های مرخصی، مساعده، ماموریت
+# ---------------------------------------------------------
+@dp.callback_query(F.data.in_({"req_leave", "req_advance", "req_mission"}))
+async def process_request_start(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    staff_name, _, _ = get_staff_info_by_id(user_id)
+    
+    if callback.data == "req_leave":
+        req_type = "مرخصی"
+    elif callback.data == "req_advance":
+        req_type = "مساعده"
+    else:
+        req_type = "ماموریت"
+
+    await state.update_data(current_request_type=req_type)
+
+    if not staff_name:
+        await state.set_state(Form.waiting_for_name)
+        await callback.message.answer(f"نام و نام خانوادگی خود را دقیقاً مطابق لیست پرسنل وارد کنید:")
+        await callback.answer()
+        return
+
+    await state.update_data(verified_staff_name=staff_name)
+    if req_type == "مرخصی":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="استحقاقی", callback_data="ltype_استحقاقی")],
+            [InlineKeyboardButton(text="استعلاجی", callback_data="ltype_استعلاجی")],
+            [InlineKeyboardButton(text="ساعتی", callback_data="ltype_ساعتی")],
+            [InlineKeyboardButton(text="بدون حقوق", callback_data="ltype_بدون_حقوق")]
+        ])
+        await callback.message.answer("نوع مرخصی را انتخاب کنید:", reply_markup=kb)
+        await state.set_state(Form.waiting_for_leave_type)
+    elif req_type == "مساعده":
+        await state.set_state(Form.waiting_for_advance_amount)
+        await callback.message.answer("مبلغ درخواستی مساعده (به ریال) را به عدد وارد کنید:")
+    else:
+        await state.set_state(Form.waiting_for_mission_city)
+        await callback.message.answer("شهر مقصد ماموریت را وارد کنید:")
+    await callback.answer()
+
+@dp.message(Form.waiting_for_name)
+async def verify_and_lock_name(message: Message, state: FSMContext):
+    entered_name = message.text.strip()
+    user_id = message.from_user.id
+
+    staff_info = is_staff_authorized(entered_name)
+    if not staff_info:
+        await message.answer("❌ نام در لیست پرسنل مجاز یافت نشد. دوباره تلاش کنید:")
+        return
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE staff_mapping SET user_id = ? WHERE staff_name = ?", (user_id, entered_name))
+    conn.commit()
+    conn.close()
+
+    await state.update_data(verified_staff_name=entered_name)
+    req_type = (await state.get_data()).get("current_request_type")
+
+    if req_type == "مرخصی":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="استحقاقی", callback_data="ltype_استحقاقی")],
+            [InlineKeyboardButton(text="استعلاجی", callback_data="ltype_استعلاجی")],
+            [InlineKeyboardButton(text="ساعتی", callback_data="ltype_ساعتی")],
+            [InlineKeyboardButton(text="بدون حقوق", callback_data="ltype_بدون_حقوق")]
+        ])
+        await message.answer(f"✅ نام ثبت شد: {entered_name}\nنوع مرخصی را انتخاب کنید:", reply_markup=kb)
+        await state.set_state(Form.waiting_for_leave_type)
+    elif req_type == "مساعده":
+        await state.set_state(Form.waiting_for_advance_amount)
+        await message.answer("مبلغ درخواستی مساعده (به ریال) را به عدد وارد کنید:")
+    else:
+        await state.set_state(Form.waiting_for_mission_city)
+        await message.answer("شهر مقصد ماموریت را وارد کنید:")
+
+@dp.callback_query(Form.waiting_for_leave_type, F.data.startswith("ltype_"))
+async def process_leave_type_selected(callback: CallbackQuery, state: FSMContext):
+    ltype = callback.data.split("_")[1]
+    await state.update_data(leave_type=ltype)
+    
+    if ltype == "ساعتی":
+        await state.set_state(Form.waiting_for_hourly_date)
+        await callback.message.answer("تاریخ روز مرخصی را با فرمت `YYYY/MM/DD` وارد کنید:")
+    else:
+        await state.set_state(Form.waiting_for_leave_start_date)
+        await callback.message.answer(f"تاریخ خروج (شروع مرخصی) را با فرمت `YYYY/MM/DD` وارد کنید:")
+    await callback.answer()
+
+@dp.message(Form.waiting_for_hourly_date)
+async def receive_hourly_date(message: Message, state: FSMContext):
+    if not validate_jalali_date(message.text):
+        await message.answer("❌ فرمت تاریخ نامعتبر است! با فرمت `YYYY/MM/DD` وارد کنید:")
+        return
+    await state.update_data(hourly_date=message.text.strip())
+    await state.set_state(Form.waiting_for_hourly_times)
+    await message.answer("ساعت خروج و ورود را وارد کنید (مثلاً: 09:00 تا 13:00):")
+
+@dp.message(Form.waiting_for_hourly_times)
+async def receive_hourly_times(message: Message, state: FSMContext):
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, balance, _ = get_staff_info_by_id(user_id)
+    
+    leave_date = user_data.get("hourly_date")
+    times = message.text.strip()
+    
+    col1 = f"تاریخ: {leave_date}"
+    col2 = f"ساعت: {times}"
+    col3 = "مدت: ساعتی"
+    details = f"تاریخ: {leave_date} | ساعت: {times}"
+
+    await finalize_leave_request(message, user_id, staff_name, balance, col1, col2, col3, details, 0.0)
+
+@dp.message(Form.waiting_for_leave_start_date)
+async def receive_leave_start(message: Message, state: FSMContext):
+    if not validate_jalali_date(message.text):
+        await message.answer("❌ فرمت تاریخ نامعتبر است! با فرمت `YYYY/MM/DD` وارد کنید:")
+        return
+    await state.update_data(leave_start=message.text.strip())
+    await state.set_state(Form.waiting_for_leave_end_date)
+    await message.answer("تاریخ ورود (پایان مرخصی) را با فرمت `YYYY/MM/DD` وارد کنید:")
+
+@dp.message(Form.waiting_for_leave_end_date)
+async def receive_leave_end(message: Message, state: FSMContext):
+    if not validate_jalali_date(message.text):
+        await message.answer("❌ فرمت تاریخ نامعتبر است! با فرمت `YYYY/MM/DD` وارد کنید:")
+        return
+
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, balance, _ = get_staff_info_by_id(user_id)
+    
+    start_str = user_data.get("leave_start")
+    end_str = message.text.strip()
+    holidays = get_holidays_list()
+
+    calculated_days = 1.0
+    try:
+        s_parts = [int(x) for x in start_str.split('/')]
+        e_parts = [int(x) for x in end_str.split('/')]
+        d1 = jdatetime.date(s_parts[0], s_parts[1], s_parts[2])
+        d2 = jdatetime.date(e_parts[0], e_parts[1], e_parts[2])
+        
+        current_d = d1
+        working_days = 0
+        while current_d <= d2:
+            d_str = current_d.strftime("%Y/%m/%d")
+            if current_d.weekday() != 6 and d_str not in holidays:
+                working_days += 1
+            current_d += jdatetime.timedelta(days=1)
+        calculated_days = float(working_days) if working_days > 0 else 1.0
+    except Exception:
+        calculated_days = 1.0
+
+    col1 = f"خروج: {start_str}"
+    col2 = f"ورود: {end_str}"
+    col3 = f"تعداد روز کسر: {calculated_days} روز"
+    details = f"خروج: {start_str} | ورود: {end_str} | کسر از مرخصی: {calculated_days} روز"
+
+    await finalize_leave_request(message, user_id, staff_name, balance, col1, col2, col3, details, calculated_days)
+
+async def finalize_leave_request(message, user_id, user_name, balance, col1, col2, col3, details, days_to_deduct):
+    now_j = jdatetime.datetime.now()
+    created_at = now_j.strftime("%Y/%m/%d %H:%M")
+    month_tag = now_j.strftime("%Y/%m")
+    
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, user_name, message.from_user.full_name, "مرخصی", col1, col2, col3, str(days_to_deduct), "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    text = f"📩 **درخواست مرخصی (کد: #{req_id})**\n\n👤 پرسنل: {user_name} (مانده: {balance} روز)\n📝 {details}\n📅 ثبت: {created_at}\nوضعیت: ⏳ در انتظار تأیید سرپرست"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")]])
+
+    try:
+        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_LEAVE, text=text, reply_markup=kb)
+        await message.answer(f"✅ درخواست مرخصی شما (کد: #{req_id}) ثبت شد.")
+    except Exception:
+        await message.answer("❌ خطا در ارسال به گروه.")
+    await state.clear()
+
+# ---------------------------------------------------------
+# مساعده با سقف پویا
+# ---------------------------------------------------------
+@dp.message(Form.waiting_for_advance_amount)
+async def receive_advance_amount(message: Message, state: FSMContext):
+    raw_text = message.text.replace(",", "").replace("ریال", "").strip()
+    if not raw_text.isdigit():
+        await message.answer("❌ مبلغ فقط باید عدد باشد:")
+        return
+
+    amount = int(raw_text)
+    today_day = jdatetime.datetime.now().day
+    daily_rate = MAX_BASE_ADVANCE / 30.0
+    allowed_limit = int(today_day * daily_rate)
+
+    if amount > allowed_limit:
+        await message.answer(f"⚠️ سقف مجاز مساعده تا امروز ({today_day} روز از ماه): {allowed_limit:,} ریال است. مبلغ کمتری وارد کنید:")
+        return
+
+    await state.update_data(advance_amount=f"{amount:,}")
+    await state.set_state(Form.waiting_for_advance_card)
+    await message.answer("شماره کارت (۱۶ رقم) یا شبا جهت واریز را وارد کنید:")
+
+@dp.message(Form.waiting_for_advance_card)
+async def receive_advance_card(message: Message, state: FSMContext):
+    card = message.text.strip()
+    if not validate_card_or_sheba(card):
+        await message.answer("❌ شماره کارت یا شبا نامعتبر است:")
+        return
+    await state.update_data(advance_card=card)
+    await state.set_state(Form.waiting_for_advance_reason)
+    await message.answer("دلیل درخواست مساعده را بنویسید:")
+
+@dp.message(Form.waiting_for_advance_reason)
+async def receive_advance_reason(message: Message, state: FSMContext):
+    reason = message.text.strip()
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, _, _ = get_staff_info_by_id(user_id)
+    
+    amount = user_data.get("advance_amount")
+    card = user_data.get("advance_card")
+    now_j = jdatetime.datetime.now()
+    created_at = now_j.strftime("%Y/%m/%d %H:%M")
+    month_tag = now_j.strftime("%Y/%m")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, staff_name, message.from_user.full_name, "مساعده", f"مبلغ: {amount}", f"دلیل: {reason}", f"کارت: {card}", "ندارد", "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    text = f"💵 **درخواست مساعده (کد: #{req_id})**\n\n👤 پرسنل: {staff_name}\n💵 مبلغ: {amount} ریال\n📝 دلیل: {reason}\n💳 کارت: `{card}`\n📅 ثبت: {created_at}\nوضعیت: ⏳ در انتظار تأیید سرپرست"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")]])
+
+    try:
+        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_ADVANCE, text=text, reply_markup=kb)
+        await message.answer(f"✅ درخواست مساعده شما (کد: #{req_id}) ثبت شد.")
+    except Exception:
+        await message.answer("❌ خطا در ارسال به گروه.")
+    await state.clear()
+
+# ---------------------------------------------------------
+# گزارش ماموریت
+# ---------------------------------------------------------
+@dp.message(Form.waiting_for_mission_city)
+async def receive_mission_city(message: Message, state: FSMContext):
+    await state.update_data(mission_city=message.text.strip())
+    await state.set_state(Form.waiting_for_mission_days)
+    await message.answer("تعداد روز ماموریت را به عدد وارد کنید:")
+
+@dp.message(Form.waiting_for_mission_days)
+async def receive_mission_days(message: Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("❌ تعداد روز باید عدد باشد:")
+        return
+
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, _, _ = get_staff_info_by_id(user_id)
+    
+    city = user_data.get("mission_city")
+    days = message.text.strip()
+    now_j = jdatetime.datetime.now()
+    created_at = now_j.strftime("%Y/%m/%d %H:%M")
+    month_tag = now_j.strftime("%Y/%m")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, staff_name, message.from_user.full_name, "ماموریت", f"شهر: {city}", f"مدت: {days} روز", "-", "ندارد", "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    text = f"📍 **گزارش ماموریت (کد: #{req_id})**\n\n👤 پرسنل: {staff_name}\n🏙️ مقصد: {city}\n⏳ مدت: {days} روز\n📅 ثبت: {created_at}\nوضعیت: ⏳ در انتظار تأیید سرپرست"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")]])
+
+    try:
+        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_MISSION, text=text, reply_markup=kb)
+        await message.answer(f"✅ گزارش ماموریت شما (کد: #{req_id}) ثبت شد.")
+    except Exception:
+        await message.answer("❌ خطا در ارسال به گروه.")
+    await state.clear()
+
+# ---------------------------------------------------------
+# مراحل تأیید / رد درخواست‌ها + ارسال پیام به واحد مالی
+# ---------------------------------------------------------
+@dp.callback_query(F.data.startswith("step1_") | F.data.startswith("approve_") | F.data.startswith("reject_") | F.data.startswith("cancel_") | F.data.startswith("paid_"))
+async def handle_request_decision(callback: CallbackQuery):
+    data = callback.data
+    user_id = callback.from_user.id
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+
+    if data.startswith("paid_"):
+        req_id = data.split("_")[1]
+        cursor.execute("SELECT user_id, request_type, col1 FROM requests WHERE id = ?", (req_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            target_user_id, req_type, col1 = row
+            cursor.execute("UPDATE requests SET status = '💳 تسویه و پرداخت شده' WHERE id = ?", (req_id,))
+            conn.commit()
+            conn.close()
+
+            try:
+                await callback.message.edit_text(callback.message.text + "\n\n✅ **وجه پرداخت و تسویه گردید.**", reply_markup=None)
+            except Exception:
+                pass
+
+            try:
+                await bot.send_message(chat_id=target_user_id, text=f"🎉 **خبر خوش!** درخواست {req_type} (کد: #{req_id}) پرداخت و تسویه گردید.")
+            except Exception:
+                pass
+
+            await callback.answer("وضعیت پرداخت ثبت شد.")
+            return
+
+    if data.startswith("cancel_"):
+        req_id = data.split("_")[1]
+        cursor.execute("SELECT user_id, status FROM requests WHERE id = ?", (req_id,))
+        row = cursor.fetchone()
+        
+        if row and row[0] == user_id:
+            if "در انتظار تأیید سرپرست" in row[1]:
+                cursor.execute("UPDATE requests SET status = '❌ لغو شده توسط پرسنل' WHERE id = ?", (req_id,))
+                conn.commit()
+                conn.close()
+                await callback.message.edit_text(callback.message.text + "\n\n**[این درخواست توسط شما لغو شد]**", reply_markup=None)
+                await callback.answer("درخواست شما با موفقیت لغو شد.")
+                return
+        conn.close()
+        return
+
+    if data.startswith("step1_"):
+        req_id = data.split("_")[1]
+        cursor.execute("UPDATE requests SET status = '⏳ در انتظار تأیید نهایی مدیریت' WHERE id = ?", (req_id,))
+        conn.commit()
+        conn.close()
+
+        updated_text = callback.message.text or callback.message.caption or ""
+        updated_text = updated_text.replace("⏳ در انتظار تأیید سرپرست", "⏳ در انتظار تأیید نهایی مدیریت")
+
+        final_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ تأیید نهایی", callback_data=f"approve_{req_id}"),
+             InlineKeyboardButton(text="❌ رد", callback_data=f"reject_{req_id}")]
+        ])
+
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=updated_text, reply_markup=final_kb)
+            else:
+                await callback.message.edit_text(text=updated_text, reply_markup=final_kb)
+        except Exception:
+            pass
+        await callback.answer("مرحله اول تایید شد.")
+        return
+
+    action, req_id = data.split("_")
+    new_status = "✅ تأیید شده قطعی" if action == "approve" else "❌ رد شده"
+    
+    cursor.execute("SELECT user_id, user_name, request_type, col1, col2, col3, location, created_at FROM requests WHERE id = ?", (req_id,))
+    row = cursor.fetchone()
+    
+    if row:
+        target_user_id, user_name, req_type, col1, col2, col3, location, created_at = row
+        cursor.execute("UPDATE requests SET status = ? WHERE id = ?", (new_status, req_id))
+        
+        if req_type == "مرخصی" and action == "approve":
+            try:
+                days = float(location)
+                cursor.execute("UPDATE staff_mapping SET leave_balance = leave_balance - ? WHERE user_id = ?", (days, target_user_id))
+            except Exception:
+                pass
+        conn.commit()
+
+        cursor.execute("SELECT phone_number FROM staff_mapping WHERE user_id = ?", (target_user_id,))
+        phone_row = cursor.fetchone()
+        phone = phone_row[0] if phone_row else "N/A"
+        conn.close()
+
+        pdf_bytes = generate_official_pdf(req_id, req_type, user_name, phone, f"{col1} | {col2} | {col3}", "Approved", created_at)
+        pdf_file = BufferedInputFile(pdf_bytes, filename=f"Request_{req_id}_Official.pdf")
+
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=callback.message.caption + f"\n\n{new_status}", reply_markup=None)
+            else:
+                await callback.message.edit_text(text=callback.message.text + f"\n\n{new_status}", reply_markup=None)
+        except Exception:
+            pass
+
+        try:
+            await bot.send_document(chat_id=target_user_id, document=pdf_file, caption=f"📄 فرم رسمی درخواست #{req_id} ({new_status})")
+        except Exception:
+            pass
+
+        if action == "approve" and req_type in ["مساعده", "تنخواه"]:
+            fin_id = get_finance_manager_id()
+            fin_text = (
+                f"💳 **دستور پرداخت جدید (واحد مالی)**\n\n"
+                f"🔹 **کد درخواست:** #{req_id}\n"
+                f"👤 **نام پرسنل:** {user_name}\n"
+                f"📌 **نوع:** {req_type}\n"
+                f"💵 {col1}\n"
+                f"📝 {col2}\n"
+                f"💳 {col3}\n"
+                f"📅 **تاریخ ثبت:** {created_at}\n\n"
+                f"لطفاً پس از واریز وجه، روی دکمه زیر کلیک کنید:"
+            )
+            pay_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="پرداخت شد 💳", callback_data=f"paid_{req_id}")]
+            ])
+            try:
+                await bot.send_message(chat_id=fin_id, text=fin_text, reply_markup=pay_kb)
+            except Exception as e:
+                print(f"❌ خطا در ارسال پیام به مسئول مالی: {e}")
+
+    await callback.answer(f"درخواست {new_status} شد.")
+
+# ---------------------------------------------------------
+# وظایف پس‌زمینه (Background Schedulers)
+# ---------------------------------------------------------
+async def pending_requests_checker():
+    while True:
+        try:
+            await asyncio.sleep(21600)  # هر ۶ ساعت
+            conn = sqlite3.connect("requests.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, user_name, request_type, created_at FROM requests WHERE status LIKE '%در انتظار%'")
+            rows = cursor.fetchall()
+            conn.close()
+
+            now_j = jdatetime.datetime.now()
+            for r in rows:
+                req_id, u_name, r_type, c_at = r
+                try:
+                    c_date = jdatetime.datetime.strptime(c_at, "%Y/%m/%d %H:%M")
+                    if (now_j - c_date).total_seconds() / 3600 >= 24:
+                        t_id = TOPIC_LEAVE if r_type == "مرخصی" else (TOPIC_ADVANCE if r_type == "مساعده" else (TOPIC_PETTY if r_type == "تنخواه" else (TOPIC_ASSETS if r_type == "تحویل اموال" else TOPIC_MISSION)))
+                        await bot.send_message(chat_id=GROUP_ID, message_thread_id=t_id, 
+                                               text=f"⚠️ هشدار: درخواست #{req_id} ({u_name}) بیش از ۲۴ ساعت معطل است.")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+async def main():
+    print("Bot is running with Asset Management (Car, POS, Printer, Fuel Card) integration...")
+    asyncio.create_task(pending_requests_checker())
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    import asyncio
-    print("Bot is running with full topic integration, auto-migration and reset command...")
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(main())
