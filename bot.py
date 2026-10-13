@@ -30,7 +30,7 @@ TOPIC_LEAVE = 2     # تاپیک مرخصی
 TOPIC_ADVANCE = 3   # تاپیک مساعده
 TOPIC_MISSION = 38  # تاپیک ماموریت
 TOPIC_PETTY = 57    # تاپیک تنخواه
-TOPIC_ASSETS = 59    # تاپیک تحویل اموال (می‌توانید تغییر دهید)
+TOPIC_ASSETS = 3    # تاپیک تحویل اموال
 
 ADMIN_IDS = [114906446, 827616077]
 MAIN_ADMIN_ID = 114906446
@@ -242,9 +242,23 @@ class Form(StatesGroup):
     waiting_for_petty_photo = State()
     waiting_for_petty_amount = State()
     waiting_for_petty_desc = State()
-    # وضعیت‌های تحویل اموال
-    waiting_for_asset_type = State()
-    waiting_for_asset_details = State()
+    
+    # 🚗 حالات پله‌ای تحویل اموال
+    asset_car_code = State()
+    asset_car_type = State()
+    asset_car_plate = State()
+    asset_car_km = State()
+    asset_car_desc = State()
+
+    asset_fuel_code = State()
+    asset_fuel_pass = State()
+
+    asset_pos_code = State()
+    asset_pos_bank = State()
+    asset_pos_charger = State()
+
+    asset_printer_code = State()
+    asset_printer_charger = State()
 
 class AdminForm(StatesGroup):
     add_staff_name = State()
@@ -282,7 +296,7 @@ def get_holidays_list():
     return rows
 
 # ---------------------------------------------------------
-# دستورات اولیه و احراز هویت با شماره تماس
+# دستورات پایه و احراز هویت
 # ---------------------------------------------------------
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
@@ -398,7 +412,7 @@ async def show_user_requests(callback: CallbackQuery):
     await callback.answer()
 
 # ---------------------------------------------------------
-# آمار و داشبورد پرسنل ("📊 وضعیت من")
+# اصلاح‌شده: آمار و داشبورد پرسنل ("📊 وضعیت من")
 # ---------------------------------------------------------
 @dp.callback_query(F.data == "my_stats")
 async def show_user_stats(callback: CallbackQuery):
@@ -409,19 +423,23 @@ async def show_user_stats(callback: CallbackQuery):
     conn = sqlite3.connect("requests.db")
     cursor = conn.cursor()
     
-    cursor.execute("SELECT location FROM requests WHERE user_id = ? AND request_type = 'مرخصی' AND month_tag = ? AND status LIKE '%تأیید شده%'", (user_id, current_month))
+    # 1. محاسبه مرخصی
+    cursor.execute("SELECT location FROM requests WHERE user_id = ? AND request_type = 'مرخصی' AND month_tag = ? AND (status LIKE '%تأیید شده%' OR status LIKE '%پرداخت شده%')", (user_id, current_month))
     leave_rows = cursor.fetchall()
-    used_leave = sum([float(r[0]) for r in leave_rows if r[0] and r[0].replace('.', '', 1).isdigit()])
+    used_leave = sum([float(r[0]) for r in leave_rows if r[0] and str(r[0]).replace('.', '', 1).isdigit()])
 
-    cursor.execute("SELECT col1 FROM requests WHERE user_id = ? AND request_type = 'مساعده' AND month_tag = ? AND status LIKE '%تأیید شده%'", (user_id, current_month))
+    # 2. محاسبه مساعده (اصلاح‌شده برای خواندن از ستون col1)
+    cursor.execute("SELECT col1 FROM requests WHERE user_id = ? AND request_type = 'مساعده' AND month_tag = ? AND (status LIKE '%تأیید شده%' OR status LIKE '%پرداخت شده%')", (user_id, current_month))
     adv_rows = cursor.fetchall()
     total_adv = 0
     for r in adv_rows:
-        val = ''.join(filter(str.isdigit, r[0]))
-        if val:
-            total_adv += int(val)
+        text_val = str(r[0])
+        digits_only = ''.join(filter(str.isdigit, text_val))
+        if digits_only:
+            total_adv += int(digits_only)
 
-    cursor.execute("SELECT col2 FROM requests WHERE user_id = ? AND request_type = 'ماموریت' AND month_tag = ? AND status LIKE '%تأیید شده%'", (user_id, current_month))
+    # 3. تعداد ماموریت
+    cursor.execute("SELECT col2 FROM requests WHERE user_id = ? AND request_type = 'ماموریت' AND month_tag = ? AND (status LIKE '%تأیید شده%' OR status LIKE '%پرداخت شده%')", (user_id, current_month))
     mission_rows = cursor.fetchall()
     total_missions = len(mission_rows)
 
@@ -618,37 +636,158 @@ async def generate_advanced_report(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
 # ---------------------------------------------------------
-# بخش تحویل اموال و تجهیزات (Asset & Fleet Management)
+# 🚗 بخش تحویل اموال و تجهیزات (پله‌ای و مرحله‌به‌مرحله)
 # ---------------------------------------------------------
 @dp.callback_query(F.data == "req_asset")
 async def process_asset_start(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚗 خودروی سازمانی", callback_data="asset_خودرو")],
-        [InlineKeyboardButton(text="💳 کارت‌خوان (POS)", callback_data="asset_کارتخوان")],
-        [InlineKeyboardButton(text="🖨️ پرینتر جیبی", callback_data="asset_پرینتر")],
-        [InlineKeyboardButton(text="⛽ کارت سوخت", callback_data="asset_کارت_سوخت")]
+        [InlineKeyboardButton(text="🚗 خودروی سازمانی", callback_data="asset_sel_خودرو")],
+        [InlineKeyboardButton(text="⛽ کارت سوخت", callback_data="asset_sel_کارت_سوخت")],
+        [InlineKeyboardButton(text="💳 کارت‌خوان (POS)", callback_data="asset_sel_کارتخوان")],
+        [InlineKeyboardButton(text="🖨️ پرینتر جیبی", callback_data="asset_sel_پرینتر")]
     ])
-    await callback.message.answer("🚗 **ثبت تحویل اقلام امانی و تجهیزات**\n\nلطفاً نوع قلم مورد نظر را انتخاب کنید:", reply_markup=kb)
+    await callback.message.answer("🚗 **ثبت تحویل اقلام امانی و تجهیزات**\n\nلطفاً قلم مورد نظر را انتخاب کنید:", reply_markup=kb)
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("asset_"))
-async def process_asset_type_selected(callback: CallbackQuery, state: FSMContext):
-    asset_type = callback.data.split("_")[1]
-    await state.update_data(asset_type=asset_type)
-    await state.set_state(Form.waiting_for_asset_details)
+# --- روند ۱: خودرو ---
+@dp.callback_query(F.data == "asset_sel_خودرو")
+async def asset_car_step1(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.asset_car_code)
+    await callback.message.answer("🚗 **[۱/۵] خودروی سازمانی**\n\nلطفاً **کد خودرو** را وارد کنید:")
+    await callback.answer()
+
+@dp.message(Form.asset_car_code)
+async def asset_car_step2(message: Message, state: FSMContext):
+    await state.update_data(car_code=message.text.strip())
+    await state.set_state(Form.asset_car_type)
+    await message.answer("🚗 **[۲/۵] خودروی سازمانی**\n\nلطفاً **نوع خودرو** (مثلاً آریزو ۸، پژو و...) را وارد کنید:")
+
+@dp.message(Form.asset_car_type)
+async def asset_car_step3(message: Message, state: FSMContext):
+    await state.update_data(car_type=message.text.strip())
+    await state.set_state(Form.asset_car_plate)
+    await message.answer("🚗 **[۳/۵] خودروی سازمانی**\n\nلطفاً **پلاک خودرو** را وارد کنید:")
+
+@dp.message(Form.asset_car_plate)
+async def asset_car_step4(message: Message, state: FSMContext):
+    await state.update_data(car_plate=message.text.strip())
+    await state.set_state(Form.asset_car_km)
+    await message.answer("🚗 **[۴/۵] خودروی سازمانی**\n\nلطفاً **کیلومتر تحویلی** را به عدد وارد کنید:")
+
+@dp.message(Form.asset_car_km)
+async def asset_car_step5(message: Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("❌ کیلومتر باید عدد باشد. دوباره وارد کنید:")
+        return
+    await state.update_data(car_km=message.text.strip())
+    await state.set_state(Form.asset_car_desc)
+    await message.answer("🚗 **[۵/۵] خودروی سازمانی**\n\nتوضیحات تکمیلی یا وضعیت بدنه را بنویسید (در صورت نداشتن، خط تیره `-` بگذارید):")
+
+@dp.message(Form.asset_car_desc)
+async def asset_car_finish(message: Message, state: FSMContext):
+    desc = message.text.strip()
+    data = await state.get_data()
     
-    prompt_text = f"قلم انتخابی: **{asset_type}**\n\nلطفاً **شماره پلاک، شماره سریال یا مشخصات کامل** قلم تحویلی (همراه با کیلومتر اولیه خودرو در صورت نیاز) را وارد کنید:"
-    await callback.message.answer(prompt_text)
+    col1 = f"کد: {data.get('car_code')} | نوع: {data.get('car_type')}"
+    col2 = f"پلاک: {data.get('car_plate')} | کیلومتر: {data.get('car_km')}"
+    col3 = f"توضیحات: {desc}"
+    
+    await finalize_asset_request(message, state, "خودروی سازمانی", col1, col2, col3)
+
+# --- روند ۲: کارت سوخت ---
+@dp.callback_query(F.data == "asset_sel_کارت_سوخت")
+async def asset_fuel_step1(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.asset_fuel_code)
+    await callback.message.answer("⛽ **[۱/۲] کارت سوخت**\n\nلطفاً **کد کارت سوخت** را وارد کنید:")
     await callback.answer()
 
-@dp.message(Form.waiting_for_asset_details)
-async def receive_asset_details(message: Message, state: FSMContext):
-    details = message.text.strip()
-    user_data = await state.get_data()
-    user_id = message.from_user.id
+@dp.message(Form.asset_fuel_code)
+async def asset_fuel_step2(message: Message, state: FSMContext):
+    await state.update_data(fuel_code=message.text.strip())
+    await state.set_state(Form.asset_fuel_pass)
+    await message.answer("⛽ **[۲/۲] کارت سوخت**\n\nلطفاً **رمز کارت سوخت** را وارد کنید:")
+
+@dp.message(Form.asset_fuel_pass)
+async def asset_fuel_finish(message: Message, state: FSMContext):
+    f_pass = message.text.strip()
+    data = await state.get_data()
+    
+    col1 = f"کد کارت سوخت: {data.get('fuel_code')}"
+    col2 = f"رمز: {f_pass}"
+    col3 = "-"
+    
+    await finalize_asset_request(message, state, "کارت سوخت", col1, col2, col3)
+
+# --- روند ۳: کارت‌خوان (POS) ---
+@dp.callback_query(F.data == "asset_sel_کارتخوان")
+async def asset_pos_step1(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.asset_pos_code)
+    await callback.message.answer("💳 **[۱/۳] کارت‌خوان (POS)**\n\nلطفاً **کد دستگاه کارت‌خوان** را وارد کنید:")
+    await callback.answer()
+
+@dp.message(Form.asset_pos_code)
+async def asset_pos_step2(message: Message, state: FSMContext):
+    await state.update_data(pos_code=message.text.strip())
+    await state.set_state(Form.asset_pos_bank)
+    await message.answer("💳 **[۲/۳] کارت‌خوان (POS)**\n\nلطفاً **نام بانک** مربوطه را وارد کنید:")
+
+@dp.message(Form.asset_pos_bank)
+async def asset_pos_step3(message: Message, state: FSMContext):
+    bank_name = message.text.strip()
+    await state.update_data(pos_bank=bank_name)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ بله، شارژر دارد", callback_data="pos_charger_yes"),
+         InlineKeyboardButton(text="❌ خیر، ندارد", callback_data="pos_charger_no")]
+    ])
+    await message.answer("💳 **[۳/۳] کارت‌خوان (POS)**\n\nآیا دستگاه **شارژر** دارد؟", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("pos_charger_"))
+async def asset_pos_finish(callback: CallbackQuery, state: FSMContext):
+    charger_status = "دارد" if "yes" in callback.data else "ندارد"
+    data = await state.get_data()
+    
+    col1 = f"کد پوز: {data.get('pos_code')}"
+    col2 = f"بانک: {data.get('pos_bank')}"
+    col3 = f"شارژر: {charger_status}"
+    
+    await finalize_asset_request(callback.message, state, "کارت‌خوان", col1, col2, col3)
+    await callback.answer()
+
+# --- روند ۴: پرینتر جیبی ---
+@dp.callback_query(F.data == "asset_sel_پرینتر")
+async def asset_printer_step1(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.asset_printer_code)
+    await callback.message.answer("🖨️ **[۱/۲] پرینتر جیبی**\n\nلطفاً **کد پرینتر** را وارد کنید:")
+    await callback.answer()
+
+@dp.message(Form.asset_printer_code)
+async def asset_printer_step2(message: Message, state: FSMContext):
+    p_code = message.text.strip()
+    await state.update_data(printer_code=p_code)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ بله، شارژر دارد", callback_data="printer_charger_yes"),
+         InlineKeyboardButton(text="❌ خیر، ندارد", callback_data="printer_charger_no")]
+    ])
+    await message.answer("🖨️ **[۲/۲] پرینتر جیبی**\n\nآیا پرینتر **شارژر** دارد؟", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("printer_charger_"))
+async def asset_printer_finish(callback: CallbackQuery, state: FSMContext):
+    charger_status = "دارد" if "yes" in callback.data else "ندارد"
+    data = await state.get_data()
+    
+    col1 = f"کد پرینتر: {data.get('printer_code')}"
+    col2 = f"شارژر: {charger_status}"
+    col3 = "-"
+    
+    await finalize_asset_request(callback.message, state, "پرینتر جیبی", col1, col2, col3)
+    await callback.answer()
+
+async def finalize_asset_request(message_obj, state, asset_type, col1, col2, col3):
+    user_id = message_obj.chat.id
     staff_name, _, _ = get_staff_info_by_id(user_id)
     
-    asset_type = user_data.get("asset_type", "تجهیزات")
     now_j = jdatetime.datetime.now()
     created_at = now_j.strftime("%Y/%m/%d %H:%M")
     month_tag = now_j.strftime("%Y/%m")
@@ -658,7 +797,7 @@ async def receive_asset_details(message: Message, state: FSMContext):
     cursor.execute("""
         INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, staff_name, message.from_user.full_name, "تحویل اموال", f"قلم: {asset_type}", f"مشخصات: {details}", "-", "ندارد", "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
+    """, (user_id, staff_name, message_obj.from_user.full_name if hasattr(message_obj, 'from_user') else "تجهیزات", "تحویل اموال", col1, col2, col3, asset_type, "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
     req_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -666,8 +805,10 @@ async def receive_asset_details(message: Message, state: FSMContext):
     text = (
         f"🚗 **گزارش تحویل اموال / تجهیزات (کد: #{req_id})**\n\n"
         f"👤 پرسنل تحویل‌گیرنده: {staff_name}\n"
-        f"📦 نوع قلم: {asset_type}\n"
-        f"📝 مشخصات/پلاک/سریال: {details}\n"
+        f"📦 نوع: {asset_type}\n"
+        f"📌 {col1}\n"
+        f"📌 {col2}\n"
+        f"📌 {col3}\n"
         f"📅 تاریخ ثبت: {created_at}\n"
         f"وضعیت: ⏳ در انتظار تأیید سرپرست"
     )
@@ -678,9 +819,12 @@ async def receive_asset_details(message: Message, state: FSMContext):
 
     try:
         await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_ASSETS, text=text, reply_markup=kb)
-        await message.answer(f"✅ فرم تحویل اموال (کد: #{req_id}) ثبت و برای تایید ارسال شد.")
+        if isinstance(message_obj, Message):
+            await message_obj.answer(f"✅ فرم تحویل اموال ({asset_type}) با کد #{req_id} ثبت و ارسال شد.")
+        else:
+            await message_obj.answer(f"✅ فرم تحویل اموال ({asset_type}) با کد #{req_id} ثبت و ارسال شد.")
     except Exception:
-        await message.answer("❌ خطا در ارسال به گروه.")
+        pass
 
     await state.clear()
 
@@ -1217,7 +1361,7 @@ async def pending_requests_checker():
             pass
 
 async def main():
-    print("Bot is running with Asset Management (Car, POS, Printer, Fuel Card) integration...")
+    print("Bot is running with step-by-step Asset Management & fixed Stats integration...")
     asyncio.create_task(pending_requests_checker())
     await dp.start_polling(bot)
 
