@@ -26,6 +26,7 @@ TOPIC_PETTY = 57    # تاپیک تنخواه
 TOPIC_ASSETS = 59   # تاپیک تحویل اموال
 
 ADMIN_IDS = [114906446, 827616077]
+MAIN_ADMIN_ID = 114906446
 FINANCE_MANAGER_ID = 114906446 
 
 MAX_BASE_ADVANCE = 100_000_000  # سقف کل ماهانه (۱۰۰ میلیون ریال)
@@ -59,16 +60,14 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ---------------------------------------------------------
-# توابع اعتبارسنجی (فرمت تاریخ اصلاح‌شده: YYYY/DD/MM)
+# توابع اعتبارسنجی (فرمت تاریخ: YYYY/DD/MM)
 # ---------------------------------------------------------
 def validate_custom_date(date_text: str) -> bool:
-    # فرمت درخواستی: سال/روز/ماه (YYYY/DD/MM)
     pattern = r'^\d{4}[/-]\d{1,2}[/-]\d{1,2}$'
     if not re.match(pattern, date_text.strip()):
         return False
     try:
         parts = [int(x) for x in date_text.strip().replace('-', '/').split('/')]
-        # در jdatetime ترتیب ساخت به صورت (year, month, day) است
         jdatetime.date(parts[0], parts[2], parts[1])
         return True
     except Exception:
@@ -129,6 +128,16 @@ def init_db():
             value TEXT
         )
     """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vehicle_insurances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            car_name TEXT,
+            plate_number TEXT,
+            third_party_date TEXT,
+            body_date TEXT
+        )
+    """)
     
     try:
         cursor.execute("ALTER TABLE staff_mapping ADD COLUMN phone_number TEXT")
@@ -168,7 +177,7 @@ def set_finance_manager_id(new_id: int):
 # ---------------------------------------------------------
 class Form(StatesGroup):
     waiting_for_phone = State()
-    waiting_for_name_link = State()     # مرحله اول اتصال شماره به نام پرسنل
+    waiting_for_name_link = State()     
     waiting_for_leave_type = State()    
     waiting_for_leave_start_date = State()   
     waiting_for_leave_end_date = State()    
@@ -183,7 +192,7 @@ class Form(StatesGroup):
     waiting_for_petty_amount = State()
     waiting_for_petty_desc = State()
     
-    # حالات تحویل اموال شخصی
+    # تحویل اموال شخصی
     asset_car_code = State()
     asset_car_type = State()
     asset_car_plate = State()
@@ -196,6 +205,15 @@ class Form(StatesGroup):
     asset_pos_charger = State()
     asset_printer_code = State()
     asset_printer_charger = State()
+
+    # درخواست خرید ملزومات اداری / انبار
+    purch_item_name = State()
+    purch_qty = State()
+    purch_desc = State()
+
+    # اصلاح درخواست رد شده توسط پرسنل
+    editing_req_id = State()
+    editing_new_col1 = State()
 
 class AdminForm(StatesGroup):
     add_staff_name = State()
@@ -220,6 +238,15 @@ class AdminForm(StatesGroup):
     admin_asset_printer_code = State()
     admin_asset_printer_charger = State()
 
+    # ثبت بیمه خودرو
+    ins_car_name = State()
+    ins_plate = State()
+    ins_third = State()
+    ins_body = State()
+
+    # دلیل رد درخواست
+    rejection_reason = State()
+
 # ---------------------------------------------------------
 # توابع کمکی
 # ---------------------------------------------------------
@@ -230,14 +257,6 @@ def get_staff_info_by_id(user_id: int):
     row = cursor.fetchone()
     conn.close()
     return row if row else (None, 0.0, None)
-
-def get_staff_info_by_phone(phone: str):
-    conn = sqlite3.connect("requests.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT staff_name, leave_balance FROM staff_mapping WHERE phone_number = ?", (phone,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
 
 def get_holidays_list():
     conn = sqlite3.connect("requests.db")
@@ -271,21 +290,18 @@ async def cmd_start(message: Message, state: FSMContext):
 @dp.message(Form.waiting_for_phone, F.contact)
 async def process_phone_contact(message: Message, state: FSMContext):
     phone = message.contact.phone_number
-    # نرمال‌سازی شماره تلفن (پاکسازی +98 یا 0 اول)
     clean_phone = phone.replace("+", "").strip()
     if clean_phone.startswith("98"):
         clean_phone = "0" + clean_phone[2:]
 
     user_id = message.from_user.id
 
-    # بررسی اینکه آیا این شماره قبلاً در لیست پرسنل ثبت شده است یا خیر
     conn = sqlite3.connect("requests.db")
     cursor = conn.cursor()
     cursor.execute("SELECT staff_name FROM staff_mapping WHERE phone_number = ? OR phone_number = ?", (phone, clean_phone))
     row = cursor.fetchone()
 
     if row:
-        # شماره از قبل وجود دارد، اکانت تلگرام را به آن لینک می‌کنیم
         staff_name = row[0]
         cursor.execute("UPDATE staff_mapping SET user_id = ? WHERE staff_name = ?", (user_id, staff_name))
         conn.commit()
@@ -294,13 +310,11 @@ async def process_phone_contact(message: Message, state: FSMContext):
         staff_name, balance, _ = get_staff_info_by_id(user_id)
         await show_main_menu(message, staff_name, balance)
     else:
-        # شماره در سیستم نیست؛ از کاربر می‌خواهیم نام دقیق خود را وارد کند تا شماره و اکانتش ثبت شود
         await state.update_data(registered_phone=phone)
         cursor.execute("SELECT staff_name FROM staff_mapping WHERE phone_number IS NULL OR phone_number = ''")
-        staffs = [r[0] for r in cursor.fetchall()]
         conn.close()
         
-        msg = "⚠️ شماره شما در لیست پرسنل یافت نشد یا هنوز متصل نشده است.\nلطفاً **نام و نام خانوادگی خود را دقیقاً مطابق لیست پرسنل** وارد کنید:"
+        msg = "⚠️ شماره شما در لیست پرسنل یافت نشد.\nلطفاً **نام و نام خانوادگی خود را دقیقاً مطابق لیست پرسنل** وارد کنید:"
         await state.set_state(Form.waiting_for_name_link)
         await message.answer(msg, reply_markup=ReplyKeyboardRemove())
 
@@ -332,14 +346,12 @@ async def process_name_link(message: Message, state: FSMContext):
 
 async def show_main_menu(message: Message, staff_name, balance):
     user_id = message.from_user.id
+    
+    # ساختار دسته‌بندی سه‌گانه جدید پرسنل
     keyboard_buttons = [
-        [InlineKeyboardButton(text="⏳ درخواست مرخصی", callback_data="req_leave")],
-        [InlineKeyboardButton(text="💵 درخواست مساعده (ریال)", callback_data="req_advance")],
-        [InlineKeyboardButton(text="📍 ثبت گزارش ماموریت", callback_data="req_mission")],
-        [InlineKeyboardButton(text="🧾 ثبت فاکتور تنخواه", callback_data="req_petty")],
-        [InlineKeyboardButton(text="🚗 تحویل/ثبت اموال و تجهیزات", callback_data="req_asset")],
-        [InlineKeyboardButton(text="📊 وضعیت من (آمار ماه جاری)", callback_data="my_stats")],
-        [InlineKeyboardButton(text="📋 پیگیری و لغو درخواست‌ها", callback_data="my_requests")]
+        [InlineKeyboardButton(text="📝 امور اداری و مالی (مرخصی، مساعده، ماموریت)", callback_data="menu_admin_finance")],
+        [InlineKeyboardButton(text="🏢 حسابداری، اموال و خرید انبار", callback_data="menu_assets_purchase")],
+        [InlineKeyboardButton(text="📊 کارنامه و پیگیری درخواست‌ها", callback_data="menu_reports_tracking")]
     ]
     
     if user_id in ADMIN_IDS:
@@ -349,7 +361,61 @@ async def show_main_menu(message: Message, staff_name, balance):
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     status_text = f"👤 پرسنل: **{staff_name}** | 🌿 مرخصی ذخیره: `{balance} روز`" if staff_name else "⚠️ نام شما ثبت نشده است."
     
-    await message.answer(f"سامانه جامع مدیریت پرسنلی\n{status_text}\n\nلطفاً گزینه مورد نظر را انتخاب کنید:", reply_markup=keyboard)
+    await message.answer(f"سامانه جامع مدیریت پرسنلی\n{status_text}\n\nلطفاً دسته‌بندی مورد نظر را انتخاب کنید:", reply_markup=keyboard)
+
+# ---------------------------------------------------------
+# مدیریت کلیک روی دسته‌بندی‌های سه‌گانه پرسنل
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "menu_admin_finance")
+async def sub_menu_admin_finance(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ درخواست مرخصی", callback_data="req_leave")],
+        [InlineKeyboardButton(text="💵 درخواست مساعده (ریال)", callback_data="req_advance")],
+        [InlineKeyboardButton(text="📍 ثبت گزارش ماموریت", callback_data="req_mission")],
+        [InlineKeyboardButton(text="🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]
+    ])
+    await callback.message.edit_text("📝 **امور اداری و مالی**\n\nلطفاً گزینه مورد نظر را انتخاب کنید:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_assets_purchase")
+async def sub_menu_assets_purchase(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧾 ثبت فاکتور تنخواه", callback_data="req_petty")],
+        [InlineKeyboardButton(text="🚗 تحویل/ثبت اموال و تجهیزات", callback_data="req_asset")],
+        [InlineKeyboardButton(text="🛒 درخواست خرید ملزومات / انبار", callback_data="req_purchase")],
+        [InlineKeyboardButton(text="🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]
+    ])
+    await callback.message.edit_text("🏢 **حسابداری، اموال و خرید انبار**\n\nلطفاً گزینه مورد نظر را انتخاب کنید:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_reports_tracking")
+async def sub_menu_reports_tracking(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 وضعیت من (آمار ماه جاری)", callback_data="my_stats")],
+        [InlineKeyboardButton(text="📋 پیگیری و لغو درخواست‌ها", callback_data="my_requests")],
+        [InlineKeyboardButton(text="🔙 بازگشت به منوی اصلی", callback_data="back_to_main")]
+    ])
+    await callback.message.edit_text("📊 **کارنامه و پیگیری درخواست‌ها**\n\nلطفاً گزینه مورد نظر را انتخاب کنید:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    staff_name, balance, _ = get_staff_info_by_id(user_id)
+    
+    keyboard_buttons = [
+        [InlineKeyboardButton(text="📝 امور اداری و مالی (مرخصی، مساعده، ماموریت)", callback_data="menu_admin_finance")],
+        [InlineKeyboardButton(text="🏢 حسابداری، اموال و خرید انبار", callback_data="menu_assets_purchase")],
+        [InlineKeyboardButton(text="📊 کارنامه و پیگیری درخواست‌ها", callback_data="menu_reports_tracking")]
+    ]
+    if user_id in ADMIN_IDS:
+        keyboard_buttons.append([InlineKeyboardButton(text="⚙️ منوی مدیریت شیشه‌ای", callback_data="admin_panel")])
+        keyboard_buttons.append([InlineKeyboardButton(text="📅 مرخصی‌های فعال امروز (/today)", callback_data="admin_today")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    status_text = f"👤 پرسنل: **{staff_name}** | 🌿 مرخصی ذخیره: `{balance} روز`" if staff_name else "⚠️ نام شما ثبت نشده است."
+    await callback.message.edit_text(f"سامانه جامع مدیریت پرسنلی\n{status_text}\n\nلطفاً دسته‌بندی مورد نظر را انتخاب کنید:", reply_markup=kb)
+    await callback.answer()
 
 @dp.message(F.text == "/today")
 @dp.callback_query(F.data == "admin_today")
@@ -358,7 +424,7 @@ async def cmd_today_leaves(event: Message | CallbackQuery):
     if user_id not in ADMIN_IDS:
         return
     
-    today_jalali = jdatetime.datetime.now().strftime("%Y/%m/%d")
+    today_jalali = jdatetime.datetime.now().strftime("%Y/%d/%m")
     conn = sqlite3.connect("requests.db")
     cursor = conn.cursor()
     cursor.execute("SELECT user_name, request_type, col1, col2 FROM requests WHERE status LIKE '%تأیید شده%' AND (col1 LIKE ? OR col2 LIKE ?)", 
@@ -380,7 +446,7 @@ async def cmd_today_leaves(event: Message | CallbackQuery):
         await event.answer(msg_text)
 
 # ---------------------------------------------------------
-# پیگیری و لغو درخواست‌ها توسط پرسنل
+# پیگیری، لغو و اصلاح درخواست‌های رد شده
 # ---------------------------------------------------------
 @dp.callback_query(F.data == "my_requests")
 async def show_user_requests(callback: CallbackQuery):
@@ -404,10 +470,48 @@ async def show_user_requests(callback: CallbackQuery):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ لغو این درخواست", callback_data=f"cancel_{req_id}")]
             ])
+        elif "رد شده" in status:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ اصلاح و ارسال مجدد", callback_data=f"editreq_{req_id}")]
+            ])
             
         await callback.message.answer(text, reply_markup=keyboard)
 
     await callback.answer()
+
+@dp.callback_query(F.data.startswith("editreq_"))
+async def edit_rejected_request_start(callback: CallbackQuery, state: FSMContext):
+    req_id = callback.data.split("_")[1]
+    await state.update_data(editing_req_id=req_id)
+    await state.set_state(Form.editing_new_col1)
+    await callback.message.answer(f"✏️ **اصلاح درخواست #{req_id}**\n\nلطفاً اطلاعات اصلاح‌شده جدید (مثلاً تاریخ صحیح یا مبلغ جدید) را وارد کنید:")
+    await callback.answer()
+
+@dp.message(Form.editing_new_col1)
+async def edit_rejected_request_save(message: Message, state: FSMContext):
+    new_val = message.text.strip()
+    data = await state.get_data()
+    req_id = data.get("editing_req_id")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE requests SET col1 = ?, status = '⏳ در انتظار تأیید سرپرست' WHERE id = ?", (new_val, req_id))
+    cursor.execute("SELECT request_type, user_name FROM requests WHERE id = ?", (req_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    await message.answer(f"✅ درخواست #{req_id} با موفقیت ویرایش شد و مجدداً برای بررسی ارسال گردید.")
+    
+    if row:
+        r_type, u_name = row
+        t_id = TOPIC_LEAVE if r_type == "مرخصی" else (TOPIC_ADVANCE if r_type == "مساعده" else (TOPIC_PETTY if r_type == "تنخواه" else (TOPIC_ASSETS if r_type == "تحویل اموال" else TOPIC_MISSION)))
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت", callback_data=f"step1_{req_id}")]])
+        try:
+            await bot.send_message(chat_id=GROUP_ID, message_thread_id=t_id, text=f"🔄 **درخواست اصلاح‌شده (کد: #{req_id})**\n\n👤 پرسنل: {u_name}\n📌 اطلاعات جدید: {new_val}\nوضعیت: ⏳ در انتظار تأیید سرپرست", reply_markup=kb)
+        except Exception:
+            pass
+
+    await state.clear()
 
 # ---------------------------------------------------------
 # آمار و داشبورد پرسنل ("📊 وضعیت من")
@@ -468,8 +572,9 @@ async def show_admin_panel(event: CallbackQuery | Message, state: FSMContext):
         [InlineKeyboardButton(text="➕ افزودن پرسنل جدید", callback_data="admin_add_staff")],
         [InlineKeyboardButton(text="✏️ ویرایش مانده مرخصی", callback_data="admin_edit_balance")],
         [InlineKeyboardButton(text="🚗 تحویل اموال به پرسنل (توسط مدیر)", callback_data="admin_asset_start")],
+        [InlineKeyboardButton(text="🛡️ ثبت بیمه خودروها (ثالث/بدنه)", callback_data="admin_add_insurance")],
         [InlineKeyboardButton(text="🗓️ افزودن تعطیل رسمی", callback_data="admin_add_holiday")],
-        [InlineKeyboardButton(text=f"💳 تغییر آیدی مسئول مالی (فعلی: {current_fin_id})", callback_data="admin_set_finance")],
+        [InlineKeyboardButton(text=f"💳 تغییر مسئول مالی (فعلی: {current_fin_id})", callback_data="admin_set_finance")],
         [InlineKeyboardButton(text="📦 دانلود فوری بکاپ دیتابیس", callback_data="admin_get_backup")]
     ])
     
@@ -483,14 +588,14 @@ async def show_admin_panel(event: CallbackQuery | Message, state: FSMContext):
 @dp.callback_query(F.data == "admin_set_finance")
 async def admin_set_finance_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminForm.set_finance_id)
-    await callback.message.answer("💳 **تغییر مسئول واحد مالی**\n\nلطفاً **User ID تلگرام** (یک عدد مانند `114906446`) مسئول جدید مالی را وارد کنید:")
+    await callback.message.answer("💳 **تغییر مسئول واحد مالی**\n\nلطفاً **User ID تلگرام** (عدد مانند `114906446`) را وارد کنید:")
     await callback.answer()
 
 @dp.message(AdminForm.set_finance_id)
 async def admin_set_finance_save(message: Message, state: FSMContext):
     val = message.text.strip()
     if not val.isdigit():
-        await message.answer("❌ شناسه باید فقط **عدد** (User ID) باشد. دوباره وارد کنید:")
+        await message.answer("❌ شناسه باید فقط **عدد** باشد. دوباره وارد کنید:")
         return
 
     set_finance_manager_id(int(val))
@@ -502,6 +607,56 @@ async def admin_backup_cb(callback: CallbackQuery):
     if callback.from_user.id in ADMIN_IDS and os.path.exists("requests.db"):
         await callback.message.answer_document(FSInputFile("requests.db"), caption="📦 پشتیبان دیتابیس")
         await callback.answer()
+
+# ---------------------------------------------------------
+# ثبت بیمه خودرو توسط مدیر
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "admin_add_insurance")
+async def admin_insurance_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminForm.ins_car_name)
+    await callback.message.answer("🛡️ **ثبت بیمه‌نامه خودرو**\n\n1️⃣ نام خودرو (مثل پراید یا آریسان) را وارد کنید:")
+    await callback.answer()
+
+@dp.message(AdminForm.ins_car_name)
+async def admin_ins_car_name(message: Message, state: FSMContext):
+    await state.update_data(ins_car=message.text.strip())
+    await state.set_state(AdminForm.ins_plate)
+    await message.answer("2️⃣ پلاک خودرو را وارد کنید:")
+
+@dp.message(AdminForm.ins_plate)
+async def admin_ins_plate(message: Message, state: FSMContext):
+    await state.update_data(ins_plate=message.text.strip())
+    await state.set_state(AdminForm.ins_third)
+    await message.answer("3️⃣ تاریخ سررسید **بیمه شخص ثالث** را با فرمت `سال/روز/ماه` (`YYYY/DD/MM`) وارد کنید:")
+
+@dp.message(AdminForm.ins_third)
+async def admin_ins_third(message: Message, state: FSMContext):
+    date_str = message.text.strip()
+    if not validate_custom_date(date_str):
+        await message.answer("❌ فرمت تاریخ نامعتبر است! با فرمت `سال/روز/ماه` (`YYYY/DD/MM`) وارد کنید:")
+        return
+    await state.update_data(ins_third=date_str)
+    await state.set_state(AdminForm.ins_body)
+    await message.answer("4️⃣ تاریخ سررسید **بیمه بدنه** را با فرمت `سال/روز/ماه` (`YYYY/DD/MM`) وارد کنید (اگر ندارد `-` بگذارید):")
+
+@dp.message(AdminForm.ins_body)
+async def admin_ins_body_save(message: Message, state: FSMContext):
+    body_date = message.text.strip()
+    data = await state.get_data()
+    
+    car = data.get("ins_car")
+    plate = data.get("ins_plate")
+    third = data.get("ins_third")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO vehicle_insurances (car_name, plate_number, third_party_date, body_date) VALUES (?, ?, ?, ?)",
+                   (car, plate, third, body_date))
+    conn.commit()
+    conn.close()
+
+    await message.answer(f"✅ اطلاعات بیمه خودروی **{car}** (پلاک: {plate}) با موفقیت ثبت شد.")
+    await state.clear()
 
 @dp.callback_query(F.data == "admin_add_holiday")
 async def admin_add_holiday_start(callback: CallbackQuery, state: FSMContext):
@@ -627,7 +782,7 @@ async def admin_edit_balance_save(message: Message, state: FSMContext):
     await state.clear()
 
 # ---------------------------------------------------------
-# 🚗 بخش تحویل اموال توسط مدیر به پرسنل خاص
+# 🚗 تحویل اموال توسط مدیر به پرسنل خاص
 # ---------------------------------------------------------
 @dp.callback_query(F.data == "admin_asset_start")
 async def admin_asset_select_staff_start(callback: CallbackQuery, state: FSMContext):
@@ -814,7 +969,7 @@ async def finalize_admin_asset(message_obj, state, asset_type, col1, col2, col3)
     target_uid = data.get("target_user_id")
     
     now_j = jdatetime.datetime.now()
-    created_at = now_j.strftime("%Y/%m/%d %H:%M")
+    created_at = now_j.strftime("%Y/%d/%m %H:%M")
     month_tag = now_j.strftime("%Y/%m")
 
     conn = sqlite3.connect("requests.db")
@@ -851,7 +1006,7 @@ async def finalize_admin_asset(message_obj, state, asset_type, col1, col2, col3)
     await state.clear()
 
 # ---------------------------------------------------------
-# بخش تحویل اموال و تجهیزات توسط پرسنل (عادی)
+# بخش تحویل اموال توسط پرسنل
 # ---------------------------------------------------------
 @dp.callback_query(F.data == "req_asset")
 async def process_asset_start(callback: CallbackQuery, state: FSMContext):
@@ -874,7 +1029,7 @@ async def asset_car_step1(callback: CallbackQuery, state: FSMContext):
 async def asset_car_step2(message: Message, state: FSMContext):
     await state.update_data(car_code=message.text.strip())
     await state.set_state(Form.asset_car_type)
-    await message.answer("🚗 **[۲/۵] خودروی سازمانی**\n\nلطفاً **نوع خودرو** (مثلاً پراید یا آریسان) را وارد کنید:")
+    await message.answer("🚗 **[۲/۵] خودروی سازمانی**\n\nلطفاً **نوع خودرو** را وارد کنید:")
 
 @dp.message(Form.asset_car_type)
 async def asset_car_step3(message: Message, state: FSMContext):
@@ -895,7 +1050,7 @@ async def asset_car_step5(message: Message, state: FSMContext):
         return
     await state.update_data(car_km=message.text.strip())
     await state.set_state(Form.asset_car_desc)
-    await message.answer("🚗 **[۵/۵] خودروی سازمانی**\n\nتوضیحات تکمیلی را بنویسید (در صورت نداشتن، `-` بگذارید):")
+    await message.answer("🚗 **[۵/۵] خودروی سازمانی**\n\nتوضیحات تکمیلی (در صورت نداشتن، `-` بگذارید):")
 
 @dp.message(Form.asset_car_desc)
 async def asset_car_finish(message: Message, state: FSMContext):
@@ -941,7 +1096,7 @@ async def asset_pos_step1(callback: CallbackQuery, state: FSMContext):
 async def asset_pos_step2(message: Message, state: FSMContext):
     await state.update_data(pos_code=message.text.strip())
     await state.set_state(Form.asset_pos_bank)
-    await message.answer("💳 **[۲/۳] کارت‌خوان (POS)**\n\nلطفاً **نام بانک** مربوطه را وارد کنید:")
+    await message.answer("💳 **[۲/۳] کارت‌خوان (POS)**\n\nلطفاً **نام بانک** را وارد کنید:")
 
 @dp.message(Form.asset_pos_bank)
 async def asset_pos_step3(message: Message, state: FSMContext):
@@ -1008,7 +1163,7 @@ async def finalize_asset_request(message_obj, state, asset_type, col1, col2, col
     staff_name, _, _ = get_staff_info_by_id(user_id)
     
     now_j = jdatetime.datetime.now()
-    created_at = now_j.strftime("%Y/%m/%d %H:%M")
+    created_at = now_j.strftime("%Y/%d/%m %H:%M")
     month_tag = now_j.strftime("%Y/%m")
 
     conn = sqlite3.connect("requests.db")
@@ -1048,7 +1203,74 @@ async def finalize_asset_request(message_obj, state, asset_type, col1, col2, col
     await state.clear()
 
 # ---------------------------------------------------------
-# ثبت فاکتور تنخواه (Petty Cash)
+# 🛒 ثبت درخواست خرید ملزومات / انبار
+# ---------------------------------------------------------
+@dp.callback_query(F.data == "req_purchase")
+async def process_purchase_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Form.purch_item_name)
+    await callback.message.answer("🛒 **درخواست خرید ملزومات / انبار**\n\n1️⃣ نام کالا یا ملزومات مورد نیاز را بنویسید:")
+    await callback.answer()
+
+@dp.message(Form.purch_item_name)
+async def receive_purch_item(message: Message, state: FSMContext):
+    await state.update_data(purch_item=message.text.strip())
+    await state.set_state(Form.purch_qty)
+    await message.answer("2️⃣ تعداد یا مقدار مورد نیاز را وارد کنید:")
+
+@dp.message(Form.purch_qty)
+async def receive_purch_qty(message: Message, state: FSMContext):
+    await state.update_data(purch_qty=message.text.strip())
+    await state.set_state(Form.purch_desc)
+    await message.answer("3️⃣ توضیحات یا دلیل نیاز به خرید را بنویسید:")
+
+@dp.message(Form.purch_desc)
+async def receive_purch_desc(message: Message, state: FSMContext):
+    desc = message.text.strip()
+    data = await state.get_data()
+    user_id = message.from_user.id
+    staff_name, _, _ = get_staff_info_by_id(user_id)
+
+    item = data.get("purch_item")
+    qty = data.get("purch_qty")
+
+    now_j = jdatetime.datetime.now()
+    created_at = now_j.strftime("%Y/%d/%m %H:%M")
+    month_tag = now_j.strftime("%Y/%m")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO requests (user_id, user_name, telegram_info, request_type, col1, col2, col3, location, status, created_at, month_tag) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, staff_name, message.from_user.full_name, "خرید ملزومات", f"کالا: {item}", f"تعداد: {qty}", f"توضیحات: {desc}", "-", "⏳ در انتظار تأیید سرپرست", created_at, month_tag))
+    req_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    text = (
+        f"🛒 **درخواست خرید ملزومات / انبار (کد: #{req_id})**\n\n"
+        f"👤 درخواست‌دهنده: {staff_name}\n"
+        f"📦 کالا: {item}\n"
+        f"🔢 تعداد: {qty}\n"
+        f"📝 توضیحات: {desc}\n"
+        f"📅 تاریخ: {created_at}\n"
+        f"وضعیت: ⏳ در انتظار تأیید سرپرست"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 تأیید سرپرست ➔ ارسال به مدیریت خرید", callback_data=f"step1_{req_id}")]
+    ])
+
+    try:
+        await bot.send_message(chat_id=GROUP_ID, message_thread_id=TOPIC_ASSETS, text=text, reply_markup=kb)
+        await message.answer(f"✅ درخواست خرید شما (کد: #{req_id}) ثبت و ارسال شد.")
+    except Exception:
+        pass
+
+    await state.clear()
+
+# ---------------------------------------------------------
+# ثبت فاکتور تنخواه
 # ---------------------------------------------------------
 @dp.callback_query(F.data == "req_petty")
 async def process_petty_start(callback: CallbackQuery, state: FSMContext):
@@ -1084,7 +1306,7 @@ async def receive_petty_desc(message: Message, state: FSMContext):
     photo_id = user_data.get("petty_photo")
     amount_str = user_data.get("petty_amount")
 
-    now_jalali = jdatetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+    now_jalali = jdatetime.datetime.now().strftime("%Y/%d/%m %H:%M")
     month_tag = jdatetime.datetime.now().strftime("%Y/%m")
 
     conn = sqlite3.connect("requests.db")
@@ -1119,7 +1341,7 @@ async def receive_petty_desc(message: Message, state: FSMContext):
     await state.clear()
 
 # ---------------------------------------------------------
-# شروع درخواست‌های مرخصی، مساعده، ماموریت (بدون پرسش نام به دلیل اتصال به اکانت)
+# شروع درخواست‌های مرخصی، مساعده، ماموریت
 # ---------------------------------------------------------
 @dp.callback_query(F.data.in_({"req_leave", "req_advance", "req_mission"}))
 async def process_request_start(callback: CallbackQuery, state: FSMContext):
@@ -1379,10 +1601,10 @@ async def receive_mission_days(message: Message, state: FSMContext):
     await state.clear()
 
 # ---------------------------------------------------------
-# مراحل تأیید / رد درخواست‌ها (بدون صدور PDF)
+# تأیید هوشمند، رد مشروط و اصلاحیه
 # ---------------------------------------------------------
 @dp.callback_query(F.data.startswith("step1_") | F.data.startswith("approve_") | F.data.startswith("reject_") | F.data.startswith("cancel_") | F.data.startswith("paid_"))
-async def handle_request_decision(callback: CallbackQuery):
+async def handle_request_decision(callback: CallbackQuery, state: FSMContext):
     data = callback.data
     user_id = callback.from_user.id
     conn = sqlite3.connect("requests.db")
@@ -1439,7 +1661,7 @@ async def handle_request_decision(callback: CallbackQuery):
 
         final_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ تأیید نهایی", callback_data=f"approve_{req_id}"),
-             InlineKeyboardButton(text="❌ رد", callback_data=f"reject_{req_id}")]
+             InlineKeyboardButton(text="❌ رد (مشروط/با دلیل)", callback_data=f"reject_{req_id}")]
         ])
 
         try:
@@ -1452,91 +1674,143 @@ async def handle_request_decision(callback: CallbackQuery):
         await callback.answer("مرحله اول تایید شد.")
         return
 
-    action, req_id = data.split("_")
-    new_status = "✅ تأیید شده قطعی" if action == "approve" else "❌ رد شده"
-    
-    cursor.execute("SELECT user_id, user_name, request_type, col1, col2, col3, location, created_at FROM requests WHERE id = ?", (req_id,))
-    row = cursor.fetchone()
-    
-    if row:
-        target_user_id, user_name, req_type, col1, col2, col3, location, created_at = row
-        cursor.execute("UPDATE requests SET status = ? WHERE id = ?", (new_status, req_id))
-        
-        if req_type == "مرخصی" and action == "approve":
-            try:
-                days = float(location)
-                cursor.execute("UPDATE staff_mapping SET leave_balance = leave_balance - ? WHERE user_id = ?", (days, target_user_id))
-            except Exception:
-                pass
-        conn.commit()
+    if data.startswith("reject_"):
+        req_id = data.split("_")[1]
         conn.close()
+        await state.update_data(rejecting_req_id=req_id, rejecting_msg=callback.message)
+        await state.set_state(AdminForm.rejection_reason)
+        await callback.message.answer("❌ لطفاً **دلیل رد درخواست** یا **توضیحات اصلاحی** را بنویسید تا برای پرسنل ارسال شود:")
+        await callback.answer()
+        return
 
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=callback.message.caption + f"\n\n{new_status}", reply_markup=None)
-            else:
-                await callback.message.edit_text(text=callback.message.text + f"\n\n{new_status}", reply_markup=None)
-        except Exception:
-            pass
-
-        try:
-            await bot.send_message(chat_id=target_user_id, text=f"📄 وضعیت درخواست #{req_id} ({req_type}): **{new_status}**")
-        except Exception:
-            pass
-
-        if action == "approve" and req_type in ["مساعده", "تنخواه"]:
-            fin_id = get_finance_manager_id()
-            fin_text = (
-                f"💳 **دستور پرداخت جدید (واحد مالی)**\n\n"
-                f"🔹 **کد درخواست:** #{req_id}\n"
-                f"👤 **نام پرسنل:** {user_name}\n"
-                f"📌 **نوع:** {req_type}\n"
-                f"💵 {col1}\n"
-                f"📝 {col2}\n"
-                f"💳 {col3}\n"
-                f"📅 **تاریخ ثبت:** {created_at}\n\n"
-                f"لطفاً پس از واریز وجه، روی دکمه زیر کلیک کنید:"
-            )
-            pay_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="پرداخت شد 💳", callback_data=f"paid_{req_id}")]
-            ])
-            try:
-                await bot.send_message(chat_id=fin_id, text=fin_text, reply_markup=pay_kb)
-            except Exception as e:
-                print(f"❌ خطا در ارسال پیام به مسئول مالی: {e}")
-
-    await callback.answer(f"درخواست {new_status} شد.")
-
-# ---------------------------------------------------------
-# وظایف پس‌زمینه (Background Schedulers)
-# ---------------------------------------------------------
-async def pending_requests_checker():
-    while True:
-        try:
-            await asyncio.sleep(21600)  # هر ۶ ساعت
-            conn = sqlite3.connect("requests.db")
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, user_name, request_type, created_at FROM requests WHERE status LIKE '%در انتظار%'")
-            rows = cursor.fetchall()
-            conn.close()
-
-            now_j = jdatetime.datetime.now()
-            for r in rows:
-                req_id, u_name, r_type, c_at = r
+    action, req_id = data.split("_")
+    if action == "approve":
+        new_status = "✅ تأیید شده قطعی"
+        cursor.execute("SELECT user_id, user_name, request_type, col1, col2, col3, location, created_at FROM requests WHERE id = ?", (req_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            target_user_id, user_name, req_type, col1, col2, col3, location, created_at = row
+            cursor.execute("UPDATE requests SET status = ? WHERE id = ?", (new_status, req_id))
+            
+            if req_type == "مرخصی":
                 try:
-                    c_date = jdatetime.datetime.strptime(c_at, "%Y/%d/%m %H:%M")
-                    if (now_j - c_date).total_seconds() / 3600 >= 24:
-                        t_id = TOPIC_LEAVE if r_type == "مرخصی" else (TOPIC_ADVANCE if r_type == "مساعده" else (TOPIC_PETTY if r_type == "تنخواه" else (TOPIC_ASSETS if r_type == "تحویل اموال" else TOPIC_MISSION)))
-                        await bot.send_message(chat_id=GROUP_ID, message_thread_id=t_id, 
-                                               text=f"⚠️ هشدار: درخواست #{req_id} ({u_name}) بیش از ۲۴ ساعت معطل است.")
+                    days = float(location)
+                    cursor.execute("UPDATE staff_mapping SET leave_balance = leave_balance - ? WHERE user_id = ?", (days, target_user_id))
                 except Exception:
                     pass
+            conn.commit()
+            conn.close()
+
+            try:
+                if callback.message.photo:
+                    await callback.message.edit_caption(caption=callback.message.caption + f"\n\n{new_status}", reply_markup=None)
+                else:
+                    await callback.message.edit_text(text=callback.message.text + f"\n\n{new_status}", reply_markup=None)
+            except Exception:
+                pass
+
+            try:
+                await bot.send_message(chat_id=target_user_id, text=f"📄 وضعیت درخواست #{req_id} ({req_type}): **{new_status}**")
+            except Exception:
+                pass
+
+            if req_type in ["مساعده", "تنخواه"]:
+                fin_id = get_finance_manager_id()
+                fin_text = (
+                    f"💳 **دستور پرداخت جدید (واحد مالی)**\n\n"
+                    f"🔹 **کد درخواست:** #{req_id}\n"
+                    f"👤 **نام پرسنل:** {user_name}\n"
+                    f"📌 **نوع:** {req_type}\n"
+                    f"💵 {col1}\n"
+                    f"📝 {col2}\n"
+                    f"💳 {col3}\n"
+                    f"📅 **تاریخ ثبت:** {created_at}\n\n"
+                    f"لطفاً پس از واریز وجه، روی دکمه زیر کلیک کنید:"
+                )
+                pay_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="پرداخت شد 💳", callback_data=f"paid_{req_id}")]
+                ])
+                try:
+                    await bot.send_message(chat_id=fin_id, text=fin_text, reply_markup=pay_kb)
+                except Exception as e:
+                    print(f"❌ خطا در ارسال پیام به مسئول مالی: {e}")
+
+    await callback.answer(f"درخواست تأیید شد.")
+
+@dp.message(AdminForm.rejection_reason)
+async def save_rejection_reason_and_notify(message: Message, state: FSMContext):
+    reason = message.text.strip()
+    data = await state.get_data()
+    req_id = data.get("rejecting_req_id")
+
+    conn = sqlite3.connect("requests.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE requests SET status = '❌ رد شده (نیاز به اصلاح)' WHERE id = ?", (req_id,))
+    cursor.execute("SELECT user_id, request_type FROM requests WHERE id = ?", (req_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    await message.answer(f"✅ درخواست #{req_id} با موفقیت رد شد و دلیل آن برای پرسنل ارسال گردید.")
+
+    if row:
+        target_uid, r_type = row
+        try:
+            await bot.send_message(
+                chat_id=target_uid, 
+                text=f"❌ **درخواست شما (کد: #{req_id} - {r_type}) رد شد.**\n\n📝 **دلیل / توضیحات اصلاحی مدیر:**\n{reason}\n\nشما می‌توانید از طریق بخش *«پیگیری و لغو درخواست‌ها»* نسبت به اصلاح و ارسال مجدد آن اقدام کنید."
+            )
         except Exception:
             pass
 
+    await state.clear()
+
+# ---------------------------------------------------------
+# وظایف پس‌زمینه (یادآور بیمه خودرو و بیمه تأمین اجتماعی)
+# ---------------------------------------------------------
+async def background_schedulers():
+    while True:
+        try:
+            await asyncio.sleep(43200) # هر ۱۲ ساعت بررسی
+            now_j = jdatetime.datetime.now()
+            today_str = now_j.strftime("%Y/%m/%d")
+
+            conn = sqlite3.connect("requests.db")
+            cursor = conn.cursor()
+
+            # ۱. یادآور بیمه تامین اجتماعی: ۲۵ام هر ماه برای مدیر اصلی
+            if now_j.day == 25:
+                try:
+                    await bot.send_message(chat_id=MAIN_ADMIN_ID, text="🚨 **یادآور مالی ماهانه:** امروز **۲۵ ام ماه** است؛ لطفاً نسبت به پرداخت **بیمه تأمین اجتماعی** پرسنل اقدام فرمایید.")
+                except Exception:
+                    pass
+
+            # ۲. یادآور سررسید بیمه خودروها (۷ روز قبل)
+            cursor.execute("SELECT car_name, plate_number, third_party_date, body_date FROM vehicle_insurances")
+            vehicles = cursor.fetchall()
+
+            for v in vehicles:
+                car, plate, third, body = v
+                for b_date_str in [third, body]:
+                    if not b_date_str or b_date_str == "-":
+                        continue
+                    try:
+                        p = [int(x) for x in b_date_str.replace('-', '/').split('/')]
+                        b_date = jdatetime.date(p[0], p[2], p[1])
+                        delta_days = (b_date - now_j.date()).days
+                        if delta_days == 7:
+                            await bot.send_message(chat_id=MAIN_ADMIN_ID, text=f"⚠️ **هشدار سررسید بیمه خودرو**\n\nخودروی **{car}** (پلاک: {plate}) تا **۷ روز دیگر** ({b_date_str}) مهلت تمدید بیمه دارد.")
+                    except Exception:
+                        pass
+
+            conn.close()
+        except Exception as e:
+            print(f"Background scheduler error: {e}")
+        await asyncio.sleep(43200)
+
 async def main():
-    print("Bot is running with persistent phone binding, exact name matching eliminated for active users, YYYY/DD/MM date format, and no PDF/Excel reports...")
-    asyncio.create_task(pending_requests_checker())
+    print("Bot is running with 3-tier menus, vehicle insurance reminders, social security 25th reminders, conditional rejection/revision, and inventory purchase requests...")
+    asyncio.create_task(background_schedulers())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
