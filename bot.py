@@ -136,6 +136,19 @@ async def cmd_start(message: Message, state: FSMContext):
         reply_markup=keyboard
     )
 
+@dp.message(F.text == "/reset_db")
+async def reset_database(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("⚠️ شما دسترسی ندارید!")
+        return
+        
+    if os.path.exists("requests.db"):
+        os.remove("requests.db")
+        init_db()
+        await message.answer("✅ دیتابیس با موفقیت ریست و جداول از نو ساخته شدند!")
+    else:
+        await message.answer("⚠️ فایل دیتابیس یافت نشد.")
+
 @dp.callback_query(F.data.in_({"req_leave", "req_advance", "req_mission"}))
 async def process_request_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -686,5 +699,5 @@ async def generate_advanced_report(callback: CallbackQuery, state: FSMContext):
 
 if __name__ == "__main__":
     import asyncio
-    print("Bot is running with full topic integration and auto-migration...")
+    print("Bot is running with full topic integration, auto-migration and reset command...")
     asyncio.run(dp.start_polling(bot))
