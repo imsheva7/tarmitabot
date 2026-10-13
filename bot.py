@@ -70,6 +70,14 @@ def init_db():
             month_tag TEXT
         )
     """)
+    
+    # اضافه کردن خودکار ستون‌ها در صورت وجود دیتابیس قدیمی
+    for col in ["col1", "col2", "col3", "location", "month_tag", "telegram_info"]:
+        try:
+            cursor.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # اگر ستون از قبل وجود داشته باشد خطا نادیده گرفته می‌شود
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS staff_mapping (
             user_id INTEGER PRIMARY KEY,
@@ -342,7 +350,7 @@ async def finalize_leave_request(message: Message, user_id, user_name, balance, 
         print(f"❌ خطا در ارسال مرخصی به گروه: {e}")
         await message.answer("❌ درخواست ثبت شد اما در ارسال به گروه خطایی رخ داد.")
 
-    await state.clear()
+    await message.state.clear() if hasattr(message, 'state') else None
 
 @dp.message(Form.waiting_for_advance_amount)
 async def receive_advance_amount(message: Message, state: FSMContext):
@@ -678,5 +686,5 @@ async def generate_advanced_report(callback: CallbackQuery, state: FSMContext):
 
 if __name__ == "__main__":
     import asyncio
-    print("Bot is running with full topic integration...")
+    print("Bot is running with full topic integration and auto-migration...")
     asyncio.run(dp.start_polling(bot))
