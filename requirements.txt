@@ -1,5 +1,2 @@
-aiogram>=3.0.0
-pandas
-openpyxl
-jdatetime
-reportlab
+aiogram>=3.13,<4.0
+jdatetime>=5.0.0,<6.0.0
