@@ -61,8 +61,8 @@ def test_handler_count_and_order():
         count += sum(bool(node.decorator_list) for node in ast.walk(feature_tree)
                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
 
-    assert count == 173, (
-        f"Expected 173 decorated handlers, found {count}."
+    assert count == 174, (
+        f"Expected 174 decorated handlers, found {count}."
     )
 
 

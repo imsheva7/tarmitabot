@@ -90,6 +90,10 @@ async def main():
     await send('#یادآوری',chat=-100999,thread=38)
     link=session.calls[0].reply_markup.inline_keyboard[0][0].url
     assert link=='https://t.me/test_bot?start=reminder_-100999_38'
+    await send('یادآوری',chat=-100999,thread=38)
+    assert session.calls[0].reply_markup.inline_keyboard[0][0].url==link
+    await send('این یک یادآوری برای جلسه است',chat=-100999)
+    assert session.calls==[]
     await send('#یادآوری فردا ساعت ۱۰:۳۰ جلسه',chat=-100999,thread=38)
     assert rows()[0]['remind_at']=='1405/07/25 10:30'
     assert rows()[0]['message_thread_id']==38
@@ -103,6 +107,14 @@ async def main():
     assert len(rows())==before
     await send('/start reminder_-100999_38')
     assert await context.get_state()=='Form:interactive_reminder_type'
+    assert session.calls[0].reply_markup.inline_keyboard[0][0].callback_data=='remmanage_new'
+    await click('remmanage_list_0')
+    assert session.calls[0].reply_markup.inline_keyboard[0][0].callback_data=='remmanage_view_1'
+    await click('remmanage_view_2')
+    assert session.calls[0].show_alert  # Same owner, different topic.
+    await click('remmanage_view_1')
+    assert 'جلسه' in session.calls[0].text
+    await click('remmanage_new')
     await click('rem_type_once')
     await send('فردا')
     await send('٠٩:٣٠')
@@ -157,6 +169,13 @@ async def main():
     session.calls.clear()
     await deliver_due(runtime.get_connection,app.bot,jdatetime.datetime(1405,7,24,10,30))
     assert session.calls==[]
+    await send('/start reminder_-100999_38')
+    await click('remmanage_delete_1')
+    assert len(rows())==before+3  # Confirmation screen must not delete.
+    await click('remmanage_confirm_1')
+    assert len(rows())==before+2
+    await click('remmanage_confirm_1')
+    assert session.calls[0].show_alert
     await app.close()
 
 asyncio.run(main())

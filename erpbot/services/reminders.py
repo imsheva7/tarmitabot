@@ -117,6 +117,23 @@ def register(conn, actor_id, chat_id, thread_id, spec, now):
     return repository.insert(conn,chat_id,thread_id,actor_id,name,spec)
 
 
+def manage(conn, actor_id, chat_id, thread_id, *, page=0, reminder_id=None, delete=False):
+    active_staff_name(conn,actor_id)
+    target(chat_id,thread_id)
+    if type(page) is not int or not 0 <= page <= 1000000:
+        raise ReminderError('صفحه نامعتبر است.')
+    if reminder_id is None:
+        return repository.owned_list(conn,actor_id,chat_id,thread_id,page*5)
+    if type(reminder_id) is not int or not 0 < reminder_id <= 2**63-1:
+        raise ReminderError('شناسه یادآور نامعتبر است.')
+    row=repository.owned(conn,actor_id,chat_id,thread_id,reminder_id)
+    if row is None:
+        raise ReminderError('یادآور یافت نشد یا متعلق به شما در این مقصد نیست.')
+    if delete:
+        repository.delete_owned(conn,actor_id,chat_id,thread_id,reminder_id)
+    return row
+
+
 def due(conn, now):
     max_days = 31 if now.month<=6 else 30 if now.month<=11 else (30 if jdatetime.date(now.year,1,1).isleap() else 29)
     days = list(range(now.day,32)) if now.day>=max_days else [now.day]

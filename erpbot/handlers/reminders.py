@@ -1,4 +1,5 @@
 """Reminder Router with injected storage, bot and clock."""
+import html
 from aiogram import Router, F, BaseMiddleware
 from aiogram.filters import BaseFilter, Command, CommandObject
 from aiogram.fsm.context import FSMContext
@@ -56,6 +57,65 @@ def create_router(get_connection, bot, clock):
             return f"✅ یادآوری هفتگی برای ساعت <b>{spec.time}</b> ثبت گردید."
         return f"✅ یادآوری ماهانه برای روز <b>{spec.when}</b> ساعت <b>{spec.time}</b> ثبت گردید."
 
+    def menu():
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='➕ یادآور جدید',callback_data='remmanage_new')],
+            [InlineKeyboardButton(text='📋 یادآورهای من در این مقصد',callback_data='remmanage_list_0')]])
+
+    @router.callback_query(F.data.startswith('remmanage_'))
+    async def manage_reminders(callback: CallbackQuery, state: FSMContext):
+        if callback.message.chat.type != 'private':
+            raise service.ReminderError('مدیریت یادآورها را در چت خصوصی انجام دهید.')
+        data=await state.get_data()
+        chat,thread=service.target(data.get('remind_chat_id'),data.get('remind_thread_id'))
+        action=callback.data.removeprefix('remmanage_')
+        if action=='new':
+            await state.set_state(Form.interactive_reminder_type)
+            keyboard=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=text,callback_data='rem_type_'+kind)] for text,kind in
+                [('📌 تاریخ مشخص','once'),('🔄 هفتگی','weekly'),('🗓️ ماهانه','monthly')]])
+            await callback.message.answer('نوع یادآور را انتخاب کنید:',reply_markup=keyboard)
+        else:
+            parts=action.split('_')
+            try:
+                operation=parts[0]
+                number=int(parts[1]) if len(parts)==2 else -1
+            except ValueError:
+                raise service.ReminderError('دکمه نامعتبر است.') from None
+            if operation not in ('list','view','delete','confirm'):
+                raise service.ReminderError('دکمه نامعتبر است.')
+            with get_connection() as conn:
+                rows=service.manage(conn,callback.from_user.id,chat,thread,
+                    page=number if operation=='list' else 0,
+                    reminder_id=None if operation=='list' else number,delete=operation=='confirm')
+            await state.set_state(None)
+            if operation=='list':
+                buttons=[[InlineKeyboardButton(text=str(row[6])[:40] or 'بدون عنوان',
+                    callback_data=f'remmanage_view_{row[0]}')] for row in rows[:5]]
+                if number>0:
+                    buttons.append([InlineKeyboardButton(text='صفحه قبل',callback_data=f'remmanage_list_{number-1}')])
+                if len(rows)>5:
+                    buttons.append([InlineKeyboardButton(text='صفحه بعد',callback_data=f'remmanage_list_{number+1}')])
+                buttons.extend(menu().inline_keyboard)
+                await callback.message.answer('یادآورهای شما در همین گروه/تاپیک:' if rows else 'در این گروه/تاپیک یادآوری ندارید.',
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+            elif operation=='confirm':
+                await callback.message.answer('✅ یادآور حذف شد.',reply_markup=menu())
+            else:
+                rid,kind,weekday,monthday,time,when,content,sent=rows
+                schedule=when if kind=='once' else (f'هر {next((fa for fa,en in service.DAY_MAP.items() if en==weekday),weekday)} ساعت {time}'
+                    if kind=='weekly' else f'روز {monthday} هر ماه ساعت {time}')
+                text=f'{html.escape(content[:500])}\n⏰ {html.escape(str(schedule))} (به وقت تهران)'
+                if kind=='once' and sent:
+                    text+='\n✅ ارسال شده'
+                if operation=='delete':
+                    text+='\nاین یادآور حذف شود؟'
+                buttons=[[InlineKeyboardButton(text='تأیید حذف' if operation=='delete' else '🗑 حذف',
+                    callback_data=f'remmanage_{"confirm" if operation=="delete" else "delete"}_{rid}')],
+                    [InlineKeyboardButton(text='بازگشت به فهرست',callback_data='remmanage_list_0')]]
+                await callback.message.answer(text,parse_mode='HTML',reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback.answer()
+
     @router.message(Command("start"), ReminderStartFilter())
     async def start_reminder(message: Message, command: CommandObject, state: FSMContext):
         if message.chat.type != "private":
@@ -63,27 +123,22 @@ def create_router(get_connection, bot, clock):
         chat,thread = service.parse_link(command.args)
         await state.clear()
         await state.update_data(remind_chat_id=chat,remind_thread_id=thread)
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📌 یک‌بار مصرف (تاریخ مشخص)",callback_data="rem_type_once")],
-            [InlineKeyboardButton(text="🔄 هفتگی (روز خاص هفته)",callback_data="rem_type_weekly")],
-            [InlineKeyboardButton(text="🗓️ ماهانه (روز خاص ماه)",callback_data="rem_type_monthly")],
-        ])
         await state.set_state(Form.interactive_reminder_type)
-        await message.answer("⏰ <b>تنظیم هوشمند و تعاملی یادآوری در پی‌وی</b>\n\nنوع یادآوری مورد نظر خود را انتخاب کنید:",reply_markup=keyboard,parse_mode="HTML")
+        await message.answer('⏰ ساخت و مدیریت یادآور\nیادآورها در گروه/تاپیکی که از آن وارد شدی ارسال می‌شوند. زمان‌ها به وقت تهران هستند.',reply_markup=menu())
 
-    @router.message(F.text.contains("#یادآوری"))
+    @router.message(F.text.contains("#یادآوری") | (F.text.strip() == 'یادآوری'))
     async def handle_group_reminder(message: Message, state: FSMContext):
         if message.chat.type not in ("group","supergroup"):
             await message.answer("⚠️ دستور یادآوری باید در گروه‌های کاری استفاده شود.")
             return
         text = message.text.strip()
-        if text == "#یادآوری":
+        if text in ("#یادآوری", "یادآوری"):
             info = await bot.get_me()
             payload = f"reminder_{message.chat.id}_{message.message_thread_id or 'None'}"
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🤖 تنظیم تعاملی یادآوری در پی‌وی",url=f"https://t.me/{info.username}?start={payload}")
+                InlineKeyboardButton(text="⏰ ساخت و مدیریت یادآور",url=f"https://t.me/{info.username}?start={payload}")
             ]])
-            await message.reply("⏰ برای تنظیم تعاملی یادآوری در این تاپیک/گروه، روی دکمه زیر کلیک کنید:",reply_markup=keyboard)
+            await message.reply("⏰ یادآورت را در چت خصوصی تنظیم کن؛ در همین گروه/تاپیک ارسال می‌شود.",reply_markup=keyboard)
             return
         spec = service.parse_group(text,clock())
         save(message.from_user.id,message.chat.id,message.message_thread_id,spec)

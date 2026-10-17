@@ -6,6 +6,24 @@ def active_staff_name(conn, telegram_id):
     return row[0] if row else None
 
 
+def owned_list(conn, actor_id, chat_id, thread_id, offset):
+    return conn.execute('''SELECT id,remind_type,day_of_week,day_of_month,remind_time,
+        remind_at,text_content,is_sent FROM reminders
+        WHERE telegram_user_id=? AND chat_id=? AND message_thread_id IS ?
+        ORDER BY id DESC LIMIT 6 OFFSET ?''', (actor_id,chat_id,thread_id,offset)).fetchall()
+
+
+def owned(conn, actor_id, chat_id, thread_id, reminder_id):
+    return conn.execute('''SELECT id,remind_type,day_of_week,day_of_month,remind_time,
+        remind_at,text_content,is_sent FROM reminders WHERE id=? AND telegram_user_id=?
+        AND chat_id=? AND message_thread_id IS ?''', (reminder_id,actor_id,chat_id,thread_id)).fetchone()
+
+
+def delete_owned(conn, actor_id, chat_id, thread_id, reminder_id):
+    return conn.execute('''DELETE FROM reminders WHERE id=? AND telegram_user_id=?
+        AND chat_id=? AND message_thread_id IS ?''', (reminder_id,actor_id,chat_id,thread_id)).rowcount
+
+
 def insert(conn, chat_id, thread_id, actor_id, name, spec):
     return conn.execute("""INSERT INTO reminders(chat_id,message_thread_id,telegram_user_id,user_name,
         remind_type,day_of_week,day_of_month,remind_time,remind_at,text_content,is_sent)
