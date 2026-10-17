@@ -1,0 +1,45 @@
+"""Asset FSM names preserved for existing conversations."""
+from aiogram.fsm.state import State, StatesGroup
+
+
+class Form(StatesGroup):
+    asset_car_code = State()
+    asset_car_desc = State()
+    asset_car_km = State()
+    asset_car_plate = State()
+    asset_car_preview = State()
+    asset_car_type = State()
+    asset_fuel_code = State()
+    asset_fuel_l10000 = State()
+    asset_fuel_l1500 = State()
+    asset_fuel_l3000 = State()
+    asset_fuel_pass = State()
+    asset_fuel_preview = State()
+    asset_pos_bank = State()
+    asset_pos_charger = State()
+    asset_pos_code = State()
+    asset_pos_preview = State()
+    asset_printer_charger = State()
+    asset_printer_code = State()
+    asset_printer_preview = State()
+    return_asset_desc = State()
+    return_asset_preview = State()
+
+
+class AdminForm(StatesGroup):
+    admin_asgn_temp_code = State()
+    admin_asgn_temp_desc = State()
+    admin_asgn_temp_fcode = State()
+    admin_asgn_temp_fpass = State()
+    admin_asgn_temp_km = State()
+    admin_asgn_temp_l10000 = State()
+    admin_asgn_temp_l1500 = State()
+    admin_asgn_temp_l3000 = State()
+    admin_asgn_temp_pbank = State()
+    admin_asgn_temp_pcharger = State()
+    admin_asgn_temp_pcode = State()
+    admin_asgn_temp_plate = State()
+    admin_asgn_temp_prcharger = State()
+    admin_asgn_temp_prcode = State()
+    admin_asgn_temp_type = State()
+    edit_asset_details = State()
